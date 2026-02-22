@@ -27,6 +27,16 @@ from torch.utils.data.distributed import DistributedSampler
 warnings.filterwarnings("ignore")
 import argparse
 
+
+def _collate_with_active_stems(batch):
+    """Collate dataset_type=7 batches while preserving per-sample active stem ids."""
+    stems, mixes, active_stem_ids = zip(*batch)
+    stems = torch.stack(stems, dim=0)
+    mixes = torch.stack(mixes, dim=0)
+    active_stem_ids = [list(sample_ids) for sample_ids in active_stem_ids]
+    return stems, mixes, active_stem_ids
+
+
 def prepare_data(config: Union[ConfigDict, OmegaConf], args: argparse.Namespace, batch_size: int) -> DataLoader:
     """
     Build the training DataLoader. If torch.distributed.is_initialized() is True,
@@ -40,6 +50,8 @@ def prepare_data(config: Union[ConfigDict, OmegaConf], args: argparse.Namespace,
     Returns:
         Configured DataLoader for the training split.
     """
+    collate_fn = _collate_with_active_stems if args.dataset_type == 7 else None
+
     # DDP
     if dist.is_initialized():
         rank = dist.get_rank()
@@ -74,6 +86,7 @@ def prepare_data(config: Union[ConfigDict, OmegaConf], args: argparse.Namespace,
             pin_memory=args.pin_memory,
             persistent_workers=args.persistent_workers,
             prefetch_factor=args.prefetch_factor,
+            collate_fn=collate_fn,
         )
     else:
         trainset = MSSDataset(
@@ -92,6 +105,7 @@ def prepare_data(config: Union[ConfigDict, OmegaConf], args: argparse.Namespace,
             pin_memory=args.pin_memory,
             persistent_workers=args.persistent_workers,
             prefetch_factor=args.prefetch_factor,
+            collate_fn=collate_fn,
         )
 
     return train_loader

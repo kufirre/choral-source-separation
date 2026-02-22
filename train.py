@@ -27,9 +27,82 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+
+def _to_int_list(active_stem_ids):
+    if active_stem_ids is None:
+        return None
+    if torch.is_tensor(active_stem_ids):
+        return [int(v) for v in active_stem_ids.flatten().tolist()]
+    if isinstance(active_stem_ids, np.ndarray):
+        return [int(v) for v in active_stem_ids.reshape(-1).tolist()]
+    if isinstance(active_stem_ids, (list, tuple)):
+        result = []
+        for stem_id in active_stem_ids:
+            if torch.is_tensor(stem_id):
+                if stem_id.numel() != 1:
+                    raise ValueError("Expected scalar tensor for active stem id")
+                result.append(int(stem_id.item()))
+            elif isinstance(stem_id, np.ndarray):
+                if stem_id.size != 1:
+                    raise ValueError("Expected scalar ndarray for active stem id")
+                result.append(int(stem_id.reshape(-1)[0]))
+            elif isinstance(stem_id, (list, tuple)):
+                raise ValueError("Nested active stem id list must be handled per-sample")
+            else:
+                result.append(int(stem_id))
+        return result
+    return [int(active_stem_ids)]
+
+
+def _normalize_active_stem_ids(active_stem_ids, batch_size):
+    if active_stem_ids is None:
+        return None
+
+    # dataset.py custom collate path: List[List[int]] per sample
+    if (
+        isinstance(active_stem_ids, (list, tuple))
+        and len(active_stem_ids) == batch_size
+        and all(isinstance(el, (list, tuple, np.ndarray)) or torch.is_tensor(el) for el in active_stem_ids)
+    ):
+        return [_to_int_list(el) for el in active_stem_ids]
+
+    # default torch collate path for list[int]: transposed List[Tensor(batch_size)]
+    if (
+        isinstance(active_stem_ids, (list, tuple))
+        and len(active_stem_ids) > 0
+        and all(torch.is_tensor(el) and el.ndim == 1 and el.numel() == batch_size for el in active_stem_ids)
+    ):
+        per_sample_ids = []
+        for sample_idx in range(batch_size):
+            per_sample_ids.append([int(el[sample_idx].item()) for el in active_stem_ids])
+        return per_sample_ids
+
+    return _to_int_list(active_stem_ids)
+
+
 def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids):
     if get_internal_loss:
-        loss =model(x, y, active_stem_ids=active_stem_ids)
+        active_stem_ids = _normalize_active_stem_ids(active_stem_ids, x.shape[0])
+
+        # Support per-sample active stems for dataset_type=7 batching.
+        if (
+            isinstance(active_stem_ids, list)
+            and len(active_stem_ids) == x.shape[0]
+            and x.shape[0] > 0
+            and all(isinstance(el, list) for el in active_stem_ids)
+        ):
+            losses = []
+            for sample_idx, sample_active_ids in enumerate(active_stem_ids):
+                sample_loss = model(
+                    x[sample_idx: sample_idx + 1],
+                    y[sample_idx: sample_idx + 1],
+                    active_stem_ids=sample_active_ids,
+                )
+                losses.append(sample_loss)
+            loss = torch.stack(losses).mean()
+            return loss
+
+        loss = model(x, y, active_stem_ids=active_stem_ids)
         if isinstance(device_ids, (list, tuple)):
             loss = loss.mean()
         return loss
@@ -85,7 +158,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
     get_internal_loss = (args.model_type in (
         'mel_band_roformer',
         'bs_roformer',
-        'bs_mamba2',
+        'vcin',
         'mel_band_conformer',
         'bs_conformer'
     ) and not args.use_standard_loss)

@@ -33,7 +33,7 @@ def parse_args_train(dict_args: Union[argparse.Namespace, Dict, None]) -> argpar
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_type", type=str, default='mdx23c',
-                        help="One of mdx23c, htdemucs, segm_models, mel_band_roformer, bs_roformer, swin_upernet, bandit")
+                        help="One of mdx23c, htdemucs, segm_models, mel_band_roformer, bs_roformer, vcin, swin_upernet, bandit")
     parser.add_argument("--config_path", type=str, help="path to config file")
     parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint to start training")
     parser.add_argument("--load_optimizer", action='store_true',
@@ -145,7 +145,7 @@ def parse_args_valid(dict_args: Union[Dict, None]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_type", type=str, default='mdx23c',
                         help="One of mdx23c, htdemucs, segm_models, mel_band_roformer,"
-                             " bs_roformer, swin_upernet, bandit")
+                             " bs_roformer, vcin, swin_upernet, bandit")
     parser.add_argument("--config_path", type=str, help="Path to config file")
     parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint"
                                                                           " to valid weights")
@@ -198,7 +198,7 @@ def parse_args_inference(dict_args: Union[Dict, None]) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_type", type=str, default='mdx23c',
-                        help="One of bandit, bandit_v2, bs_roformer, htdemucs, mdx23c, mel_band_roformer,"
+                        help="One of bandit, bandit_v2, bs_roformer, htdemucs, mdx23c, mel_band_roformer, vcin,"
                              " scnet, scnet_unofficial, segm_models, swin_upernet, torchseg")
     parser.add_argument("--config_path", type=str, help="path to config file")
     parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint to valid weights")
@@ -332,9 +332,9 @@ def get_model_from_config(model_type: str, config_path: str) -> Tuple[nn.Module,
     elif model_type == 'bs_roformer_experimental':
         from models.bs_roformer.bs_roformer_experimental import BSRoformer
         model = BSRoformer(**dict(config.model))
-    elif model_type == 'bs_mamba2':
-        from models.bs_mamba2_code.bs_mamba2 import BSMamba2Model
-        model = BSMamba2Model(**dict(config.model))
+    elif model_type == 'vcin':
+        from models.vcin import VCINModel
+        model = VCINModel(**dict(config.model))
     elif model_type == 'swin_upernet':
         from models.upernet_swin_transformers import Swin_UperNet_Model
         model = Swin_UperNet_Model(config)

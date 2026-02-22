@@ -11,8 +11,8 @@ fi
 RUN_ID="${RUN_ID:-phase-c-vcin-satb-calibration-$(date +%Y%m%d-%H%M%S)}"
 JOB_NAME="${JOB_NAME:-${RUN_ID}}"
 
-MODEL_TYPE="${MODEL_TYPE:-bs_mamba2}"
-CONFIG_PATH="${CONFIG_PATH:-configs/config_satb_bs_mamba2_baseline.yaml}"
+MODEL_TYPE="${MODEL_TYPE:-vcin}"
+CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_c.yaml}"
 DATASET_TYPE="${DATASET_TYPE:-4}"
 TRAIN_DATA_PATHS="${TRAIN_DATA_PATHS:-/gcs_data/processed/jaCappella_satb}"
 VALID_DATA_PATHS="${VALID_DATA_PATHS:-/gcs_data/processed/ESMUC_Choir_satb}"

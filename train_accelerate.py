@@ -33,6 +33,34 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+def _collate_with_active_stems(batch):
+    stems, mixes, active_stem_ids = zip(*batch)
+    stems = torch.stack(stems, dim=0)
+    mixes = torch.stack(mixes, dim=0)
+    active_stem_ids = [list(sample_ids) for sample_ids in active_stem_ids]
+    return stems, mixes, active_stem_ids
+
+
+def _normalize_active_stem_ids(active_stem_ids):
+    if active_stem_ids is None:
+        return None
+    if torch.is_tensor(active_stem_ids):
+        return [int(v) for v in active_stem_ids.flatten().tolist()]
+    if isinstance(active_stem_ids, np.ndarray):
+        return [int(v) for v in active_stem_ids.reshape(-1).tolist()]
+    if isinstance(active_stem_ids, (list, tuple)):
+        result = []
+        for stem_id in active_stem_ids:
+            if torch.is_tensor(stem_id):
+                result.append(int(stem_id.item()))
+            elif isinstance(stem_id, np.ndarray):
+                result.append(int(stem_id.reshape(-1)[0]))
+            else:
+                result.append(int(stem_id))
+        return result
+    return [int(active_stem_ids)]
+
+
 def valid(model, valid_loader, args, config, device, verbose=False):
     instruments = prefer_target_instrument(config)
 
@@ -93,12 +121,12 @@ def train_model(args):
     device = accelerator.device
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_type", type=str, default='mdx23c', help="One of mdx23c, htdemucs, segm_models, mel_band_roformer, bs_roformer, swin_upernet, bandit")
+    parser.add_argument("--model_type", type=str, default='mdx23c', help="One of mdx23c, htdemucs, segm_models, mel_band_roformer, bs_roformer, vcin, swin_upernet, bandit")
     parser.add_argument("--config_path", type=str, help="path to config file")
     parser.add_argument("--start_check_point", type=str, default='', help="Initial checkpoint to start training")
     parser.add_argument("--results_path", type=str, help="path to folder where results will be stored (weights, metadata)")
     parser.add_argument("--data_path", nargs="+", type=str, help="Dataset data paths. You can provide several folders.")
-    parser.add_argument("--dataset_type", type=int, default=1, help="Dataset type. Must be one of: 1, 2, 3 or 4. Details here: https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/docs/dataset_types.md")
+    parser.add_argument("--dataset_type", type=int, default=1, help="Dataset type. Must be one of: 1, 2, 3, 4, 5, 6, 7. Details here: https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/docs/dataset_types.md")
     parser.add_argument("--valid_path", nargs="+", type=str, help="validation data paths. You can provide several folders.")
     parser.add_argument("--num_workers", type=int, default=0, help="dataloader num_workers")
     parser.add_argument("--pin_memory", type=bool, default=False, help="dataloader pin_memory")
@@ -153,7 +181,8 @@ def train_model(args):
         batch_size=batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=args.pin_memory
+        pin_memory=args.pin_memory,
+        collate_fn=_collate_with_active_stems if args.dataset_type == 7 else None,
     )
 
     validset = MSSValidationDataset(args)
@@ -273,13 +302,38 @@ def train_model(args):
         total = 0
 
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
-        for i, (batch, mixes) in enumerate(pbar):
+        for i, data in enumerate(pbar):
+            if len(data) == 3:
+                batch, mixes, active_stem_ids = data
+            elif len(data) == 2:
+                batch, mixes = data
+                active_stem_ids = None
+            else:
+                raise ValueError(f'Unsupported batch format with len={len(data)}')
+
             y = batch
             x = mixes
 
-            if args.model_type in ['mel_band_roformer', 'bs_roformer', 'bs_mamba2', 'mel_band_conformer', 'bs_conformer']:
+            if args.model_type in ['mel_band_roformer', 'bs_roformer', 'vcin', 'mel_band_conformer', 'bs_conformer']:
                 # loss is computed in forward pass
-                loss = model(x, y)
+                if (
+                    active_stem_ids is not None
+                    and isinstance(active_stem_ids, list)
+                    and len(active_stem_ids) == x.shape[0]
+                    and all(isinstance(el, list) for el in active_stem_ids)
+                ):
+                    losses = []
+                    for sample_idx, sample_ids in enumerate(active_stem_ids):
+                        losses.append(
+                            model(
+                                x[sample_idx: sample_idx + 1],
+                                y[sample_idx: sample_idx + 1],
+                                active_stem_ids=_normalize_active_stem_ids(sample_ids),
+                            )
+                        )
+                    loss = torch.stack(losses).mean()
+                else:
+                    loss = model(x, y, active_stem_ids=_normalize_active_stem_ids(active_stem_ids))
             else:
                 y_ = model(x)
                 if args.use_multistft_loss:

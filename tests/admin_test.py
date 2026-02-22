@@ -36,8 +36,7 @@ MODEL_CONFIGS = {
     # 'config_vocals_swin_upernet.yaml': {'model_type': 'swin_upernet'},
     # 'config_musdb18_torchseg.yaml': {'model_type': 'torchseg'},
     # 'config_musdb18_segm_models.yaml': {'model_type': 'segm_models'},
-    # 'config_musdb18_bs_mamba2.yaml': {'model_type': 'bs_mamba2'},
-    # 'config_vocals_bs_mamba2.yaml': {'model_type': 'bs_mamba2'},
+    # bs_mamba2 configs removed — use model_type='vcin' with configs/vcin/ instead
     # 'config_vocals_torchseg.yaml': {'model_type': 'torchseg'}
 }
 

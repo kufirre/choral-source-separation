@@ -68,7 +68,10 @@ ENV/
 env.bak/
 venv.bak/
 pyvenv.cfg
-Scripts/
+# On case-insensitive filesystems this can unintentionally hide the repo's
+# top-level `scripts/` directory, so keep Windows venv ignores explicit.
+venv/Scripts/
+ENV/Scripts/
 
 *.code-workspace
 

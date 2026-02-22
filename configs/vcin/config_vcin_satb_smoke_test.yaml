@@ -4,7 +4,7 @@ audio:
   min_mean_abs: 0.0
 
 training:
-  batch_size: 8
+  batch_size: 4
   gradient_accumulation_steps: 1
   grad_clip: 0
   segment: 11
@@ -14,8 +14,8 @@ training:
   normalize: true
   instruments: ['S', 'A', 'T', 'B']
   target_instrument: null
-  num_epochs: 1000
-  num_steps: 1000
+  num_epochs: 2
+  num_steps: 25
   optimizer: prodigy
   lr: 1.0
   patience: 2
@@ -29,9 +29,12 @@ training:
 
 model:
   dim: 128
-  depth: 12
+  depth: 6
   stereo: true
   num_stems: 4
+  num_latent_sources: 10
+  num_iterations: 3
+  backbone_type: bs_mamba2
   time_module_depth: 1
   freq_module_depth: 1
   mask_estimator_depth: 2
@@ -55,6 +58,15 @@ model:
   - 256
   multi_stft_hop_size: 147
   multi_stft_normalized: false
+  # VCIN module flags
+  enable_repulsion: true
+  enable_pitch: true
+  enable_assignment: true
+  enable_gate: true
+  enable_intent: true
+  enable_cgp: false
+  enable_film: true
+  embed_dim: 64
 
 augmentations:
   enable: true
@@ -75,4 +87,4 @@ augmentations:
 
 inference:
   num_overlap: 2
-  batch_size: 8
+  batch_size: 4
