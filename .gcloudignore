@@ -1,0 +1,47 @@
+# Ignore version control
+.git/
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large / unnecessary for build
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.safetensors
+data/
+logs/
+artifacts/
+wandb/
+runs/
+*.tar.gz
+*.zip

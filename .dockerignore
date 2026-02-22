@@ -1,0 +1,16 @@
+.git
+.gitignore
+.gcloudignore
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+artifacts/
+wandb/
+logs/
+checkpoints/
+node_modules/
