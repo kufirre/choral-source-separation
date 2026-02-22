@@ -83,6 +83,7 @@ import sys
 import os
 import json
 import subprocess
+import re
 import numpy as np
 
 extracted_dir = sys.argv[1]
@@ -110,15 +111,47 @@ def peak_normalize(wav_path):
         data = data / peak * 0.95  # leave small headroom
         sf.write(wav_path, data, sr, subtype='FLOAT')
 
-# Voice name mapping: ChoralSynth name -> SATB letter
-VOICE_PATTERNS = [
-    ('tenor ii', None),  # skip duplicated tenor by default
-    ('tenor i', 'T'),
-    ('cantus', 'S'),
-    ('altus', 'A'),
-    ('tenor', 'T'),
-    ('bassus', 'B'),
-]
+IGNORE_PATTERNS = (
+    'accomp',
+    'piano',
+    'organ',
+    'practice',
+)
+
+def normalize_voice_name(filename: str) -> str:
+    """Normalize raw voice filenames for robust SATB matching."""
+    name = os.path.splitext(filename)[0].lower().strip()
+    # Collapse punctuation and repeated spaces to simplify pattern checks.
+    name = re.sub(r'[^a-z0-9]+', ' ', name)
+    return re.sub(r'\s+', ' ', name).strip()
+
+def infer_satb_label(normalized_name: str):
+    """Infer SATB part from a normalized voice track name."""
+    if any(pattern in normalized_name for pattern in IGNORE_PATTERNS):
+        return None, "auxiliary"
+
+    if normalized_name in {'voice', 'voice 2', 'voice 3', 'voice 4'}:
+        return {
+            'voice': 'S',
+            'voice 2': 'A',
+            'voice 3': 'T',
+            'voice 4': 'B',
+        }[normalized_name], "voice-numbered"
+
+    if 'tenor ii' in normalized_name:
+        # Keep single tenor by default; prefer tenor i / generic tenor.
+        return None, "auxiliary"
+
+    if 'cantus' in normalized_name or 'soprano' in normalized_name:
+        return 'S', "named"
+    if 'altus' in normalized_name or 'alto' in normalized_name:
+        return 'A', "named"
+    if 'tenor i' in normalized_name or 'tenor' in normalized_name:
+        return 'T', "named"
+    if 'bassus' in normalized_name or 'bass' in normalized_name:
+        return 'B', "named"
+
+    return None, "unknown"
 
 processed = 0
 skipped = 0
@@ -142,17 +175,10 @@ for song_name in sorted(os.listdir(extracted_dir)):
     for fname in sorted(os.listdir(voices_dir)):
         if not fname.lower().endswith('.mp3') and not fname.lower().endswith('.wav'):
             continue
-        # Parse voice name from filename
-        name_lower = os.path.splitext(fname)[0].lower().strip()
-        satb_letter = None
-        matched = False
-        for pattern, letter in VOICE_PATTERNS:
-            if pattern in name_lower:
-                satb_letter = letter
-                matched = True
-                break
+        normalized_name = normalize_voice_name(fname)
+        satb_letter, reason = infer_satb_label(normalized_name)
 
-        if not matched:
+        if reason == "unknown":
             print(f"  WARNING: Unknown voice '{fname}' in {song_name}, skipping")
             continue
         if satb_letter is None:
