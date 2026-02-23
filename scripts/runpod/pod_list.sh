@@ -15,10 +15,10 @@ RESPONSE="$(curl -sS --fail-with-body \
     -X GET "${RUNPOD_API_BASE%/}/pods" \
     -H "Authorization: Bearer ${RUNPOD_API_KEY}")"
 
-printf '%s\n' "${RESPONSE}" | python3 - <<'PY'
+RUNPOD_PODS_RESPONSE="${RESPONSE}" python3 - <<'PY'
 import json
-import sys
-pods = json.load(sys.stdin)
+import os
+pods = json.loads(os.environ["RUNPOD_PODS_RESPONSE"])
 for pod in pods:
     pod_id = pod.get("id", "")
     name = pod.get("name", "")
