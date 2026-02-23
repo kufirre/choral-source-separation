@@ -1,15 +1,16 @@
 """
 VCIN (Voice-Coupled Iterative Network) for choral source separation.
 
-Architecture overview:
-  1. BSMamba2 backbone produces M=10 over-separated latent sources
-  2. Pitch estimator produces per-voice pitch embeddings
-  3. Soft assignment maps M latent sources -> V=4 SATB voice parts
-  4. Iterative refinement loop (K=3 iterations) progressively improves
-  5. Optional modules: repulsion, intent, gate, CGP, FiLM
-
-Skeleton version: backbone -> uniform assignment -> group to SATB -> L1 + multi-STFT loss
+Architecture-focused implementation:
+  - TS-BSMamba2 backbone with over-separation into M latent sources.
+  - Exposes shared hidden tensor H from backbone internals.
+  - Iterative refinement loop over assignment, pitch, intent, and gate beliefs.
+  - Stage-1 (CRM-only) and Stage-2 (residual-refined) separation losses.
 """
+
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,14 +25,25 @@ from models.vcin.intent import IntentModule
 from models.vcin.gate import TextureGate
 from models.vcin.cgp_adapter import CGPAdapter
 from models.vcin.film import FiLMLayer
+from models.vcin.ts_backbone import TSBSMamba2Backbone
+
+
+def _as_list(x: Any) -> List[float]:
+    if x is None:
+        return []
+    if isinstance(x, (tuple, list)):
+        return [float(v) for v in x]
+    return [float(x)]
 
 
 class VCINModel(nn.Module):
     """
     Voice-Coupled Iterative Network for SATB choral separation.
 
-    Wraps a BSMamba2 backbone with over-separation (M latent sources),
-    soft assignment to V voice parts, and iterative refinement.
+    Key points:
+      - M latent sources (over-separation) grouped into V SATB outputs.
+      - Iterative assignment refinement K times.
+      - Auxiliary modules consume shared backbone hidden state H.
     """
 
     def __init__(
@@ -43,8 +55,8 @@ class VCINModel(nn.Module):
         num_stems=4,
         num_latent_sources=10,
         num_iterations=3,
-        backbone_type='bs_mamba2',
-        # BSMamba2 backbone params (passed through)
+        backbone_type='ts_bsmamba2',
+        # legacy BSMamba2-compatible args (kept for config compatibility)
         time_module_depth=1,
         freq_module_depth=1,
         dim_head=64,
@@ -63,6 +75,25 @@ class VCINModel(nn.Module):
         multi_stft_normalized=False,
         module_type='mamba2',
         mamba_gmlp=False,
+        # TS-BSMamba2-specific params
+        ts_sr=44100,
+        ts_win=2048,
+        ts_stride=512,
+        ts_feature_dim=128,
+        ts_num_repeat_mask=8,
+        ts_num_repeat_map=4,
+        # iterative damping schedules
+        assignment_damping=(0.3, 0.6, 0.9),
+        pitch_damping=(0.5, 0.8, 1.0),
+        gate_damping=(0.2, 0.4, 0.7),
+        # regularization/loss knobs
+        stage1_loss_weight=1.0,
+        stage2_loss_weight=1.0,
+        min_energy_epsilon=1e-4,
+        min_energy_loss_weight=0.0,
+        duplicate_cos_threshold=0.95,
+        duplicate_loss_weight=0.0,
+        repulsion_loss_weight=0.0,
         # VCIN module enable flags
         enable_repulsion=True,
         enable_pitch=True,
@@ -77,42 +108,82 @@ class VCINModel(nn.Module):
     ):
         super().__init__()
 
-        self.num_stems = num_stems       # V = target voice parts (4 for SATB)
-        self.num_latent_sources = num_latent_sources  # M = over-separated sources
-        self.num_iterations = num_iterations  # K = refinement iterations
-        self.stereo = stereo
-        self.audio_channels = 2 if stereo else 1
-        self.dim = dim
-        self.embed_dim = embed_dim
+        # keep references for logging/config introspection
+        _ = (
+            depth,
+            time_module_depth,
+            freq_module_depth,
+            dim_head,
+            heads,
+            attn_dropout,
+            ff_dropout,
+            flash_attn,
+            mask_estimator_depth,
+            module_type,
+            mamba_gmlp,
+            kwargs,
+        )
 
-        # Feature flags
-        self.enable_repulsion = enable_repulsion
-        self.enable_pitch = enable_pitch
-        self.enable_assignment = enable_assignment
-        self.enable_gate = enable_gate
-        self.enable_intent = enable_intent
-        self.enable_cgp = enable_cgp
-        self.enable_film = enable_film
+        self.num_stems = int(num_stems)
+        self.num_latent_sources = int(num_latent_sources)
+        self.num_iterations = int(num_iterations)
+        self.stereo = bool(stereo)
+        self.audio_channels = 2 if self.stereo else 1
+        self.dim = int(dim)
+        self.embed_dim = int(embed_dim)
+        self.backbone_type = backbone_type
 
-        # Store multi-STFT loss params (reused from backbone pattern)
-        self.multi_stft_resolution_loss_weight = multi_stft_resolution_loss_weight
-        self.multi_stft_resolutions_window_sizes = multi_stft_resolutions_window_sizes
-        self.multi_stft_n_fft = stft_n_fft
+        # feature flags
+        self.enable_repulsion = bool(enable_repulsion)
+        self.enable_pitch = bool(enable_pitch)
+        self.enable_assignment = bool(enable_assignment)
+        self.enable_gate = bool(enable_gate)
+        self.enable_intent = bool(enable_intent)
+        self.enable_cgp = bool(enable_cgp)
+        self.enable_film = bool(enable_film)
+
+        # schedules
+        self.assignment_damping = _as_list(assignment_damping) or [1.0]
+        self.pitch_damping = _as_list(pitch_damping) or [1.0]
+        self.gate_damping = _as_list(gate_damping) or [1.0]
+
+        # loss knobs
+        self.stage1_loss_weight = float(stage1_loss_weight)
+        self.stage2_loss_weight = float(stage2_loss_weight)
+        self.min_energy_epsilon = float(min_energy_epsilon)
+        self.min_energy_loss_weight = float(min_energy_loss_weight)
+        self.duplicate_cos_threshold = float(duplicate_cos_threshold)
+        self.duplicate_loss_weight = float(duplicate_loss_weight)
+        self.repulsion_loss_weight = float(repulsion_loss_weight)
+
+        self.multi_stft_resolution_loss_weight = float(multi_stft_resolution_loss_weight)
+        self.multi_stft_resolutions_window_sizes = tuple(int(v) for v in multi_stft_resolutions_window_sizes)
+        self.multi_stft_n_fft = int(stft_n_fft)
         self.multi_stft_window_fn = torch.hann_window
         self.multi_stft_kwargs = dict(
-            hop_length=multi_stft_hop_size,
-            normalized=multi_stft_normalized,
+            hop_length=int(multi_stft_hop_size),
+            normalized=bool(multi_stft_normalized),
         )
 
         # ---- Backbone ----
-        # Instantiate BSMamba2 with M latent sources (not V voice parts)
-        if backbone_type == 'bs_mamba2':
+        if backbone_type == 'ts_bsmamba2':
+            self.backbone = TSBSMamba2Backbone(
+                num_latent_sources=self.num_latent_sources,
+                sr=int(ts_sr),
+                win=int(ts_win),
+                stride=int(ts_stride),
+                feature_dim=int(ts_feature_dim),
+                num_repeat_mask=int(ts_num_repeat_mask),
+                num_repeat_map=int(ts_num_repeat_map),
+            )
+        elif backbone_type == 'bs_mamba2':
             from models.bs_mamba2_code.bs_mamba2 import BSMamba2Model
+
             self.backbone = BSMamba2Model(
                 dim=dim,
                 depth=depth,
                 stereo=stereo,
-                num_stems=num_latent_sources,  # M=10, not V=4
+                num_stems=self.num_latent_sources,
                 time_module_depth=time_module_depth,
                 freq_module_depth=freq_module_depth,
                 dim_head=dim_head,
@@ -135,94 +206,199 @@ class VCINModel(nn.Module):
         else:
             raise ValueError(f"Unknown backbone_type: {backbone_type}")
 
-        # ---- CRM Separator (pass-through in skeleton) ----
-        self.separator = CRMSeparator(num_latent_sources=num_latent_sources)
+        # ---- Separator (hook point) ----
+        self.separator = CRMSeparator(num_latent_sources=self.num_latent_sources)
 
-        # ---- VCIN Modules ----
-        if enable_pitch:
-            self.pitch_estimator = PitchEstimator(
-                num_voices=num_stems, embed_dim=embed_dim,
-            )
+        # ---- VCIN modules ----
+        if self.enable_pitch:
+            self.pitch_estimator = PitchEstimator(num_voices=self.num_stems, embed_dim=self.embed_dim)
 
-        if enable_assignment:
+        if self.enable_assignment:
             self.assignment = SoftAssignment(
-                num_latent_sources=num_latent_sources,
-                num_voices=num_stems,
-                embed_dim=embed_dim,
+                num_latent_sources=self.num_latent_sources,
+                num_voices=self.num_stems,
+                embed_dim=self.embed_dim,
             )
-            # Derive latent source embeddings from waveform-domain backbone outputs.
             self.source_embed_proj = nn.Sequential(
-                nn.Linear(self.audio_channels, embed_dim),
+                nn.Linear(self.audio_channels, self.embed_dim),
                 nn.GELU(),
-                nn.LayerNorm(embed_dim),
+                nn.LayerNorm(self.embed_dim),
             )
+            self.hidden_to_embed = nn.LazyLinear(self.embed_dim)
 
-        if enable_repulsion:
-            self.repulsion = RepulsionModule(
-                dim=embed_dim, num_latent_sources=num_latent_sources,
-            )
+        if self.enable_repulsion:
+            self.repulsion = RepulsionModule(dim=self.embed_dim, num_latent_sources=self.num_latent_sources)
 
-        if enable_intent:
-            self.intent = IntentModule(
-                num_voices=num_stems, embed_dim=embed_dim,
-            )
+        if self.enable_intent:
+            self.intent = IntentModule(num_voices=self.num_stems, embed_dim=self.embed_dim)
 
-        if enable_gate:
-            self.gate = TextureGate(
-                num_voices=num_stems, input_dim=embed_dim,
-            )
+        if self.enable_gate:
+            self.gate = TextureGate(num_voices=self.num_stems, input_dim=self.embed_dim)
 
-        if enable_cgp:
-            self.cgp_adapter = CGPAdapter(output_dim=embed_dim)
+        if self.enable_cgp:
+            self.cgp_adapter = CGPAdapter(output_dim=self.embed_dim)
 
-        if enable_film:
-            self.film = FiLMLayer(
-                feature_dim=embed_dim, conditioning_dim=embed_dim,
-            )
+        if self.enable_film:
+            self.film = FiLMLayer(feature_dim=self.embed_dim, conditioning_dim=self.embed_dim)
+
+        self.register_buffer('_eps', torch.tensor(1e-8), persistent=False)
+
+    @staticmethod
+    def _extract_state_dict(ckpt: Any) -> Dict[str, torch.Tensor]:
+        if isinstance(ckpt, dict):
+            if 'model_state_dict' in ckpt and isinstance(ckpt['model_state_dict'], dict):
+                return ckpt['model_state_dict']
+            if 'state_dict' in ckpt and isinstance(ckpt['state_dict'], dict):
+                return ckpt['state_dict']
+            if 'state' in ckpt and isinstance(ckpt['state'], dict):
+                return ckpt['state']
+            if all(torch.is_tensor(v) for v in ckpt.values()):
+                return ckpt
+        raise ValueError('Checkpoint does not contain a recognizable state_dict')
+
+    def load_backbone_weights(self, checkpoint_path: str, verbose: bool = True):
+        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        state = self._extract_state_dict(ckpt)
+
+        if self.backbone_type == 'ts_bsmamba2':
+            candidates = [
+                ('backbone.separator.', {k[len('backbone.separator.'):]: v for k, v in state.items() if k.startswith('backbone.separator.')}),
+                ('separator.', {k[len('separator.'):]: v for k, v in state.items() if k.startswith('separator.')}),
+                ('raw', state),
+            ]
+            chosen = None
+            for _, cand in candidates:
+                if len(cand) == 0:
+                    continue
+                if any(k.startswith('BN_mask.') or k.startswith('separator_mask.') for k in cand.keys()):
+                    chosen = cand
+                    break
+            if chosen is None:
+                raise ValueError('No TS-BSMamba2 separator keys found in checkpoint')
+
+            missing, unexpected = self.backbone.load_ts_state_dict(chosen)
+            loaded_count = len(chosen) - len(unexpected)
+            if verbose:
+                print(
+                    f"Loaded TS-BSMamba2 backbone from {checkpoint_path}: "
+                    f"loaded={loaded_count}, missing={len(missing)}, unexpected={len(unexpected)}"
+                )
+            if loaded_count <= 0:
+                raise ValueError('Backbone load matched zero parameters')
+            return
+
+        # backward-compatible path for bs_mamba2 fallback
+        from utils.model_utils import load_not_compatible_weights
+
+        load_not_compatible_weights(self.backbone, ckpt, verbose=verbose)
+
+    def _normalize_active_stem_ids(self, active_stem_ids) -> Optional[List[int]]:
+        if active_stem_ids is None:
+            return None
+        if torch.is_tensor(active_stem_ids):
+            active_stem_ids = active_stem_ids.flatten().tolist()
+        return [int(v.item() if torch.is_tensor(v) else v) for v in active_stem_ids]
+
+    def _prepare_backbone_outputs(self, x: torch.Tensor):
+        backbone_aux: Dict[str, torch.Tensor] = {}
+
+        if self.backbone_type == 'ts_bsmamba2':
+            latent_sources, backbone_aux = self.backbone(x, return_aux=True)
+            stage1_sources = backbone_aux.get('stage1_sources')
+            shared_hidden = backbone_aux.get('shared_hidden')
+        else:
+            latent_sources = self.backbone(x)
+            stage1_sources = None
+            shared_hidden = None
+
+        latent_sources = self.separator(latent_sources)
+        if stage1_sources is not None:
+            stage1_sources = self.separator(stage1_sources)
+
+        return latent_sources, stage1_sources, shared_hidden
+
+    def _compute_source_embeddings(
+        self,
+        latent_sources: torch.Tensor,
+        shared_hidden: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        source_embed = latent_sources.mean(dim=-1)
+        source_embed = self.source_embed_proj(source_embed)
+
+        if shared_hidden is not None:
+            # shared_hidden: (B, C, D, T) -> context (B, D)
+            hidden_ctx = shared_hidden.mean(dim=1).mean(dim=-1)
+            hidden_ctx = self.hidden_to_embed(hidden_ctx)
+            source_embed = source_embed + hidden_ctx.unsqueeze(1)
+
+        return source_embed
+
+    def _get_schedule_value(self, schedule: List[float], iter_idx: int) -> float:
+        if not schedule:
+            return 1.0
+        if iter_idx < len(schedule):
+            return float(schedule[iter_idx])
+        return float(schedule[-1])
 
     def assign_sources_to_voices(
         self,
         latent_sources: torch.Tensor,
         assignment: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Group M latent sources into V voice parts using soft assignment.
+        """Group M latent sources into V voice parts using soft assignment."""
+        bsz, num_sources, channels, timesteps = latent_sources.shape
+        num_voices = assignment.shape[-1]
 
-        Args:
-            latent_sources: (batch, M, channels, time) over-separated sources
-            assignment: (batch, M, V) row-stochastic assignment matrix
+        sources_flat = latent_sources.reshape(bsz, num_sources, channels * timesteps)
+        assignment_t = assignment.transpose(1, 2)
+        voices_flat = torch.bmm(assignment_t, sources_flat)
+        return voices_flat.reshape(bsz, num_voices, channels, timesteps)
 
-        Returns:
-            voice_estimates: (batch, V, channels, time)
-        """
-        # assignment: (B, M, V) -> (B, V, M)
-        # latent_sources: (B, M, C, T)
-        # voice = sum_m A[m,v] * source[m]
+    def _compute_reconstruction_losses(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pred32 = pred.float()
+        target32 = target.float()
 
-        # Reshape for einsum: (B, M, V) x (B, M, C*T) -> (B, V, C*T)
-        B, M, C, T = latent_sources.shape
-        V = assignment.shape[-1]
+        l1 = F.l1_loss(pred32, target32)
 
-        sources_flat = latent_sources.reshape(B, M, C * T)  # (B, M, C*T)
-        assignment_t = assignment.transpose(1, 2)  # (B, V, M)
-        voices_flat = torch.bmm(assignment_t, sources_flat)  # (B, V, C*T)
-        voice_estimates = voices_flat.reshape(B, V, C, T)
+        multi_stft_loss = pred32.new_zeros(())
+        for window_size in self.multi_stft_resolutions_window_sizes:
+            res_stft_kwargs = dict(
+                n_fft=max(int(window_size), self.multi_stft_n_fft),
+                win_length=int(window_size),
+                return_complex=True,
+                window=self.multi_stft_window_fn(int(window_size), device=device, dtype=torch.float32),
+                **self.multi_stft_kwargs,
+            )
 
-        return voice_estimates
+            recon_y = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
+            target_y = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
+            multi_stft_loss = multi_stft_loss + F.l1_loss(recon_y, target_y)
 
-    def load_backbone_weights(self, checkpoint_path: str, verbose: bool = True):
-        """
-        Load pre-trained weights into the backbone (e.g., from a TS-BSMamba2
-        vocals checkpoint). Uses partial weight loading for shape mismatches.
+        if len(self.multi_stft_resolutions_window_sizes) > 0:
+            multi_stft_loss = multi_stft_loss / float(len(self.multi_stft_resolutions_window_sizes))
 
-        Args:
-            checkpoint_path: Path to the checkpoint file.
-            verbose: Print loading decisions.
-        """
-        from utils.model_utils import load_not_compatible_weights
+        weighted = multi_stft_loss * self.multi_stft_resolution_loss_weight
+        return l1 + weighted, l1, multi_stft_loss
 
-        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        load_not_compatible_weights(self.backbone, ckpt, verbose=verbose)
+    def _latent_regularizers(self, latent_sources: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # minimum latent energy penalty
+        energy = latent_sources.float().pow(2).mean(dim=(2, 3))
+        min_energy_loss = F.relu(self.min_energy_epsilon - energy).mean()
+
+        # duplicate-source cosine penalty
+        src = latent_sources.float().reshape(latent_sources.shape[0], latent_sources.shape[1], -1)
+        src = F.normalize(src, dim=-1)
+        sim = torch.bmm(src, src.transpose(1, 2))
+        eye = torch.eye(sim.shape[1], device=sim.device, dtype=torch.bool).unsqueeze(0)
+        off_diag = sim.masked_fill(eye, 0.0)
+        dup_loss = F.relu(off_diag - self.duplicate_cos_threshold).pow(2).mean()
+
+        return min_energy_loss, dup_loss
 
     def forward(
         self,
@@ -231,126 +407,136 @@ class VCINModel(nn.Module):
         active_stem_ids=None,
         return_loss_breakdown=False,
     ):
-        """
-        VCIN forward pass.
-
-        Args:
-            x: (batch, channels, time) mixture waveform
-            target: (batch, V, channels, time) ground truth stems, or None
-            active_stem_ids: list of active stem indices (for partial-stem datasets)
-            return_loss_breakdown: if True, return (total_loss, (l1, multi_stft))
-
-        Returns:
-            If target is None: (batch, V, channels, time) separated voice estimates
-            If target is provided: scalar loss (or loss breakdown tuple)
-        """
         device = x.device
-        raw_audio_length = x.shape[-1]
 
-        # ---- Step 1: Backbone over-separation ----
-        # BSMamba2 forward WITHOUT target -> returns separated waveforms
-        latent_sources = self.backbone(x)  # (B, M, C, T)
+        latent_sources, stage1_sources, shared_hidden = self._prepare_backbone_outputs(x)
 
-        # ---- Step 2: CRM separator (pass-through in skeleton) ----
-        latent_sources = self.separator(latent_sources)
+        # Initialize row-stochastic assignment with uniform prior.
+        bsz = x.shape[0]
+        assignment = torch.full(
+            (bsz, self.num_latent_sources, self.num_stems),
+            1.0 / float(self.num_stems),
+            device=device,
+            dtype=latent_sources.dtype,
+        )
 
-        # ---- Step 3: Pitch estimation (placeholder) ----
-        pitch_embed = None
-        if self.enable_pitch:
-            pitch_embed = self.pitch_estimator(x)  # (B, V, embed_dim)
+        pitch_state = None
+        gate_state = None
+        source_embed = self._compute_source_embeddings(latent_sources, shared_hidden)
 
-        # ---- Step 4: Soft assignment ----
-        if self.enable_assignment:
-            # Build source embeddings from latent sources to avoid uniform-collapse.
-            source_embed = latent_sources.mean(dim=-1)  # (B, M, C)
-            source_embed = self.source_embed_proj(source_embed)  # (B, M, D)
-            assignment = self.assignment(
-                source_embeddings=source_embed,
-                pitch_embeddings=pitch_embed,
-            )  # (B, M, V)
-        else:
-            # Hard uniform assignment
-            B = x.shape[0]
-            assignment = torch.ones(
-                B, self.num_latent_sources, self.num_stems,
-                device=device,
-            ) / self.num_stems
+        for iter_idx in range(self.num_iterations):
+            voice_readouts = torch.bmm(assignment.transpose(1, 2), source_embed)
 
-        # ---- Step 5: Group latent sources to voice parts ----
-        voice_estimates = self.assign_sources_to_voices(
-            latent_sources, assignment,
-        )  # (B, V, C, T)
+            pitch_embed = None
+            if self.enable_pitch:
+                pitch_prop = self.pitch_estimator(
+                    mixture=x,
+                    shared_hidden=shared_hidden,
+                    voice_readouts=voice_readouts,
+                )
+                if pitch_state is None:
+                    pitch_state = pitch_prop
+                else:
+                    zeta = self._get_schedule_value(self.pitch_damping, iter_idx)
+                    pitch_state = (1.0 - zeta) * pitch_state + zeta * pitch_prop
+                pitch_embed = pitch_state
 
-        if active_stem_ids is not None and torch.is_tensor(active_stem_ids):
-            active_stem_ids = active_stem_ids.flatten().tolist()
-        if active_stem_ids is not None:
-            active_stem_ids = [
-                int(stem_id.item() if torch.is_tensor(stem_id) else stem_id)
-                for stem_id in active_stem_ids
-            ]
+            intent_embed = None
+            if self.enable_intent:
+                intent_embed = self.intent(
+                    voice_estimates=None,
+                    shared_hidden=shared_hidden,
+                    voice_readouts=voice_readouts,
+                )
 
-        # If no target, return separated voices
+            conditioning = voice_readouts
+            if pitch_embed is not None:
+                conditioning = conditioning + pitch_embed
+            if intent_embed is not None:
+                conditioning = conditioning + intent_embed
+
+            if self.enable_gate:
+                gate_prop = self.gate(voice_features=conditioning, shared_hidden=shared_hidden)
+                if gate_state is None:
+                    gate_state = gate_prop
+                else:
+                    beta = self._get_schedule_value(self.gate_damping, iter_idx)
+                    gate_state = (1.0 - beta) * gate_state + beta * gate_prop
+                conditioning = conditioning * gate_state
+
+            if self.enable_film:
+                source_embed = self.film(source_embed, conditioning.mean(dim=1))
+
+            if self.enable_repulsion:
+                source_embed = self.repulsion(source_embed)
+
+            if self.enable_assignment:
+                assignment_prop = self.assignment(
+                    source_embeddings=source_embed,
+                    pitch_embeddings=pitch_embed,
+                )
+            else:
+                assignment_prop = assignment
+
+            eta = self._get_schedule_value(self.assignment_damping, iter_idx)
+            assignment = (1.0 - eta) * assignment + eta * assignment_prop
+            assignment = assignment.clamp_min(float(self._eps))
+            assignment = assignment / assignment.sum(dim=-1, keepdim=True).clamp_min(float(self._eps))
+
+        voice_estimates = self.assign_sources_to_voices(latent_sources, assignment)
+
+        active_ids = self._normalize_active_stem_ids(active_stem_ids)
+
         if target is None:
-            if active_stem_ids is not None:
-                return voice_estimates[:, active_stem_ids]
+            if active_ids is not None:
+                return voice_estimates[:, active_ids]
             return voice_estimates
 
-        # ---- Loss computation ----
         if target.ndim == 2:
             target = rearrange(target, '... t -> ... 1 t')
-
-        # Trim to match lengths
         target = target[..., :voice_estimates.shape[-1]]
 
-        # Select active stems
-        if active_stem_ids is not None:
-            voice_sel = voice_estimates[:, active_stem_ids]
-            target_sel = target[:, active_stem_ids]
+        if active_ids is not None:
+            voice_sel = voice_estimates[:, active_ids]
+            target_sel = target[:, active_ids]
         else:
             voice_sel = voice_estimates
             target_sel = target
 
-        # L1 loss
-        loss = F.l1_loss(voice_sel, target_sel)
+        stage2_loss, l1_stage2, stft_stage2 = self._compute_reconstruction_losses(voice_sel, target_sel, device)
+        total_loss = self.stage2_loss_weight * stage2_loss
 
-        # Multi-resolution STFT loss
-        multi_stft_resolution_loss = 0.0
+        stage1_loss = voice_sel.new_zeros(())
+        l1_stage1 = voice_sel.new_zeros(())
+        stft_stage1 = voice_sel.new_zeros(())
+        if stage1_sources is not None and self.stage1_loss_weight > 0:
+            stage1_voices = self.assign_sources_to_voices(stage1_sources, assignment)
+            if active_ids is not None:
+                stage1_voices = stage1_voices[:, active_ids]
+            stage1_loss, l1_stage1, stft_stage1 = self._compute_reconstruction_losses(stage1_voices, target_sel, device)
+            total_loss = total_loss + self.stage1_loss_weight * stage1_loss
 
-        for window_size in self.multi_stft_resolutions_window_sizes:
-            res_stft_kwargs = dict(
-                n_fft=max(window_size, self.multi_stft_n_fft),
-                win_length=window_size,
-                return_complex=True,
-                window=self.multi_stft_window_fn(window_size, device=device),
-                **self.multi_stft_kwargs,
-            )
+        min_energy_loss, duplicate_loss = self._latent_regularizers(latent_sources)
+        if self.min_energy_loss_weight > 0:
+            total_loss = total_loss + self.min_energy_loss_weight * min_energy_loss
+        if self.duplicate_loss_weight > 0:
+            total_loss = total_loss + self.duplicate_loss_weight * duplicate_loss
 
-            recon_Y = torch.stft(
-                rearrange(voice_sel, 'b n s t -> (b n s) t'),
-                **res_stft_kwargs,
-            )
-            target_Y = torch.stft(
-                rearrange(target_sel, 'b n s t -> (b n s) t'),
-                **res_stft_kwargs,
-            )
-
-            multi_stft_resolution_loss = (
-                multi_stft_resolution_loss + F.l1_loss(recon_Y, target_Y)
-            )
-
-        weighted_multi_resolution_loss = (
-            multi_stft_resolution_loss * self.multi_stft_resolution_loss_weight
-        )
-
-        total_loss = loss + weighted_multi_resolution_loss
-
-        # Optional: repulsion loss
-        if self.enable_repulsion and hasattr(self, 'repulsion'):
-            # In skeleton, repulsion operates on placeholder embeddings
-            # This would be source embeddings in the full implementation
-            pass
+        repulsion_loss = voice_sel.new_zeros(())
+        if self.enable_repulsion and self.repulsion_loss_weight > 0:
+            repulsion_loss = self.repulsion.repulsion_loss(source_embed)
+            total_loss = total_loss + self.repulsion_loss_weight * repulsion_loss
 
         if not return_loss_breakdown:
             return total_loss
 
-        return total_loss, (loss, multi_stft_resolution_loss)
+        breakdown = {
+            'stage2_l1': l1_stage2,
+            'stage2_stft': stft_stage2,
+            'stage1_l1': l1_stage1,
+            'stage1_stft': stft_stage1,
+            'min_energy': min_energy_loss,
+            'duplicate': duplicate_loss,
+            'repulsion': repulsion_loss,
+        }
+        return total_loss, breakdown

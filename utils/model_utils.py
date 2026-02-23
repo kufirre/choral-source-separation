@@ -83,8 +83,17 @@ def demix(
     batch_size = config.inference.batch_size
 
     use_amp = getattr(config.training, 'use_amp', True)
+    amp_dtype_name = str(getattr(config.training, 'amp_dtype', 'float16')).lower()
+    if amp_dtype_name in ('float16', 'fp16', 'half'):
+        amp_dtype = torch.float16
+    elif amp_dtype_name in ('bfloat16', 'bf16'):
+        amp_dtype = torch.bfloat16
+    else:
+        raise ValueError(
+            f"Unsupported amp_dtype='{amp_dtype_name}'. Use one of: float16, bfloat16"
+        )
 
-    with torch.cuda.amp.autocast(enabled=use_amp):
+    with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
         with torch.inference_mode():
             # Initialize result and counter tensors
             req_shape = (num_instruments,) + mix.shape

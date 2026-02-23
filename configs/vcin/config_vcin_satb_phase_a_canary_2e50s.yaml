@@ -27,6 +27,7 @@ training:
   read_metadata_procs: 8
   other_fix: false
   use_amp: true
+  amp_dtype: bfloat16
 
 model:
   dim: 128
@@ -35,7 +36,20 @@ model:
   num_stems: 4
   num_latent_sources: 10
   num_iterations: 3
-  backbone_type: bs_mamba2
+  backbone_type: ts_bsmamba2
+  ts_sr: 44100
+  ts_win: 2048
+  ts_stride: 512
+  ts_feature_dim: 128
+  ts_num_repeat_mask: 8
+  ts_num_repeat_map: 4
+  stage1_loss_weight: 1.0
+  stage2_loss_weight: 1.0
+  min_energy_epsilon: 1.0e-4
+  min_energy_loss_weight: 0.0
+  duplicate_cos_threshold: 0.95
+  duplicate_loss_weight: 0.0
+  repulsion_loss_weight: 0.0
   time_module_depth: 1
   freq_module_depth: 1
   mask_estimator_depth: 2

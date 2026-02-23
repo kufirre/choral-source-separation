@@ -32,7 +32,7 @@ class MambaBlock(nn.Module):
             expand=4,  
             headdim=64,
         )
-    def forward(self, input):
+    def forward(self, input, return_aux=False):
         forward_f = input
         forward_f_output = self.forward_mamba2(forward_f)
         backward_f = torch.flip(input, [1])
@@ -308,8 +308,22 @@ class Separator(nn.Module):
 
         output = output.view(batch_size, nch, self.num_output, -1).transpose(1,2).contiguous()
         output_mask = output_mask.view(batch_size, nch, self.num_output, -1).transpose(1,2).contiguous()
-        # return output, output_mask
-        return output
+
+        if not return_aux:
+            return output
+
+        # Shared hidden state H from the internal band-split + temporal backbone.
+        shared_hidden = sep_output2.permute(0, 2, 1, 3).contiguous()
+        shared_hidden = shared_hidden.view(batch_size, nch, self.feature_dim * self.nband, -1)
+
+        aux = {
+            'shared_hidden': shared_hidden,
+            # Stage-1 CRM-only estimate before residual refinement map.
+            'stage1_sources': output_mask,
+            # Residual map branch output in waveform domain.
+            'residual_sources': output - output_mask,
+        }
+        return output, aux
 
 
 if __name__ == '__main__':

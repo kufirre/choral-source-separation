@@ -22,7 +22,7 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 DEVICE_IDS="${DEVICE_IDS:-0}"
 USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 START_CHECKPOINT="${START_CHECKPOINT:-}"
-CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_optimizer --load_scheduler --load_epoch --load_best_metric --load_all_metrics --load_all_losses}"
+CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_only_compatible_weights}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then

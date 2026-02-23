@@ -80,6 +80,17 @@ def _normalize_active_stem_ids(active_stem_ids, batch_size):
     return _to_int_list(active_stem_ids)
 
 
+def _get_amp_dtype(config: ConfigDict) -> torch.dtype:
+    amp_dtype_name = str(getattr(config.training, 'amp_dtype', 'float16')).lower()
+    if amp_dtype_name in ('float16', 'fp16', 'half'):
+        return torch.float16
+    if amp_dtype_name in ('bfloat16', 'bf16'):
+        return torch.bfloat16
+    raise ValueError(
+        f"Unsupported amp_dtype='{amp_dtype_name}'. Use one of: float16, bfloat16"
+    )
+
+
 def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids):
     if get_internal_loss:
         active_stem_ids = _normalize_active_stem_ids(active_stem_ids, x.shape[0])
@@ -116,6 +127,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                     optimizer: torch.optim.Optimizer,
                     device: torch.device, device_ids: List[int], epoch: int, use_amp: bool,
                     scaler: torch.cuda.amp.GradScaler,
+                    amp_dtype: torch.dtype,
                     scheduler,
                     gradient_accumulation_steps: int, train_loader: torch.utils.data.DataLoader,
                     multi_loss: Callable[[torch.Tensor, torch.Tensor, torch.Tensor,], torch.Tensor], all_losses=None, world_size=None, ema_model=None, safe_mode=None) -> None:
@@ -186,13 +198,13 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
             x, y = normalize_batch(x, y)
         if safe_mode:
             try:
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
                     loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
             except Exception as e:
                 print(f'Error: {e}')
                 continue
         else:
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
                 loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
 
         # Fail fast on NaN / Inf instead of silently poisoning the whole epoch.
@@ -212,11 +224,15 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
             continue
 
         loss /= gradient_accumulation_steps
-        scaler.scale(loss).backward()
+        if scaler.is_enabled():
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         if ((i + 1) % gradient_accumulation_steps == 0) or (i == len(train_loader) - 1):
 
-            scaler.unscale_(optimizer)
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
 
             grad_norm = None
             if config.training.grad_clip:
@@ -239,8 +255,11 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                         )
                     continue
 
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler.is_enabled():
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
 
             if ema_model is not None:
                 if ddp:
@@ -410,6 +429,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
     if 'model_type' in config.training:
         args.model_type = config.training.model_type
     use_amp = getattr(config.training, 'use_amp', True)
+    amp_dtype = _get_amp_dtype(config) if use_amp else torch.float16
     device_ids = args.device_ids
     if ddp:
         batch_size = config.training.batch_size
@@ -421,9 +441,17 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
 
     train_loader = prepare_data(config, args, batch_size)
 
+    checkpoint = {}
     if args.start_check_point:
         checkpoint = torch.load(args.start_check_point, weights_only=False, map_location='cpu')
-        load_start_checkpoint(args, model, checkpoint, type_='train')
+        if (
+            args.model_type == 'vcin'
+            and args.load_only_compatible_weights
+            and hasattr(model, 'load_backbone_weights')
+        ):
+            model.load_backbone_weights(args.start_check_point, verbose=True)
+        else:
+            load_start_checkpoint(args, model, checkpoint, type_='train')
     model = get_lora(args, config, model)
 
     if args.freeze_layers is not None:
@@ -504,7 +532,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
     no_improve_epochs = 0
 
     multi_loss = choice_loss(args, config)
-    scaler = GradScaler()
+    scaler = GradScaler(enabled=(use_amp and amp_dtype == torch.float16))
 
     if args.set_per_process_memory_fraction:
         torch.cuda.set_per_process_memory_fraction(1.0)
@@ -535,7 +563,8 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
             f"Num gpus: {num_gpu} "
             f"Effective batch size: {ef_batch_size}\n"
             f"Dataset type: {args.dataset_type}\n"
-            f"Optimizer: {config.training.optimizer}"
+            f"Optimizer: {config.training.optimizer}\n"
+            f"AMP: {use_amp} dtype={amp_dtype}"
         )
 
         print(f'Train for: {config.training.num_epochs} epochs')
@@ -546,7 +575,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
             train_loader.sampler.set_epoch(epoch)
 
         train_one_epoch(model, config, args, optimizer, device, device_ids, epoch,
-                        use_amp, scaler, scheduler, gradient_accumulation_steps, train_loader, multi_loss, all_losses,
+                        use_amp, scaler, amp_dtype, scheduler, gradient_accumulation_steps, train_loader, multi_loss, all_losses,
                         world_size, ema_model=ema_model, safe_mode=safe_mode)
 
         model_to_valid = ema_model if ema_model is not None else model
