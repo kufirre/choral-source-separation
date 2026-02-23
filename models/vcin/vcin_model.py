@@ -94,6 +94,19 @@ class VCINModel(nn.Module):
         duplicate_cos_threshold=0.95,
         duplicate_loss_weight=0.0,
         repulsion_loss_weight=0.0,
+        cgp_loss_weight=0.0,
+        magnitude_penalty_loss_weight=0.0,
+        magnitude_penalty_epsilon=1e-4,
+        magnitude_penalty_n_fft=None,
+        magnitude_penalty_hop_length=None,
+        magnitude_penalty_win_length=None,
+        # training-time ramps
+        cgp_warmup_steps=0,
+        repulsion_warmup_steps=0,
+        magnitude_penalty_warmup_steps=0,
+        # multi-task loss balancing
+        use_homoscedastic_weighting=True,
+        homoscedastic_init=0.0,
         # VCIN module enable flags
         enable_repulsion=True,
         enable_pitch=True,
@@ -155,6 +168,16 @@ class VCINModel(nn.Module):
         self.duplicate_cos_threshold = float(duplicate_cos_threshold)
         self.duplicate_loss_weight = float(duplicate_loss_weight)
         self.repulsion_loss_weight = float(repulsion_loss_weight)
+        self.cgp_loss_weight = float(cgp_loss_weight)
+        self.magnitude_penalty_loss_weight = float(magnitude_penalty_loss_weight)
+        self.magnitude_penalty_epsilon = float(magnitude_penalty_epsilon)
+
+        self.cgp_warmup_steps = int(cgp_warmup_steps)
+        self.repulsion_warmup_steps = int(repulsion_warmup_steps)
+        self.magnitude_penalty_warmup_steps = int(magnitude_penalty_warmup_steps)
+
+        self.use_homoscedastic_weighting = bool(use_homoscedastic_weighting)
+        self.homoscedastic_init = float(homoscedastic_init)
 
         self.multi_stft_resolution_loss_weight = float(multi_stft_resolution_loss_weight)
         self.multi_stft_resolutions_window_sizes = tuple(int(v) for v in multi_stft_resolutions_window_sizes)
@@ -164,6 +187,10 @@ class VCINModel(nn.Module):
             hop_length=int(multi_stft_hop_size),
             normalized=bool(multi_stft_normalized),
         )
+
+        self.magnitude_penalty_n_fft = int(magnitude_penalty_n_fft or stft_n_fft)
+        self.magnitude_penalty_hop_length = int(magnitude_penalty_hop_length or stft_hop_length)
+        self.magnitude_penalty_win_length = int(magnitude_penalty_win_length or stft_win_length)
 
         # ---- Backbone ----
         if backbone_type == 'ts_bsmamba2':
@@ -236,12 +263,33 @@ class VCINModel(nn.Module):
             self.gate = TextureGate(num_voices=self.num_stems, input_dim=self.embed_dim)
 
         if self.enable_cgp:
-            self.cgp_adapter = CGPAdapter(output_dim=self.embed_dim)
+            self.cgp_adapter = CGPAdapter(
+                output_dim=self.embed_dim,
+                num_voices=self.num_stems,
+            )
 
         if self.enable_film:
             self.film = FiLMLayer(feature_dim=self.embed_dim, conditioning_dim=self.embed_dim)
 
+        self._loss_term_names = (
+            'stage2',
+            'stage1',
+            'min_energy',
+            'duplicate',
+            'repulsion',
+            'cgp',
+            'magnitude_penalty',
+        )
+        if self.use_homoscedastic_weighting:
+            self.loss_log_vars = nn.ParameterDict(
+                {
+                    name: nn.Parameter(torch.tensor(self.homoscedastic_init, dtype=torch.float32))
+                    for name in self._loss_term_names
+                }
+            )
+
         self.register_buffer('_eps', torch.tensor(1e-8), persistent=False)
+        self.register_buffer('_train_step', torch.tensor(0, dtype=torch.long), persistent=False)
 
     @staticmethod
     def _extract_state_dict(ckpt: Any) -> Dict[str, torch.Tensor]:
@@ -361,6 +409,38 @@ class VCINModel(nn.Module):
             return float(schedule[iter_idx])
         return float(schedule[-1])
 
+    @staticmethod
+    def _linear_ramp_multiplier(step: int, warmup_steps: int) -> float:
+        if warmup_steps <= 0:
+            return 1.0
+        return float(min(1.0, step / float(max(warmup_steps, 1))))
+
+    def _combine_loss_terms(
+        self,
+        loss_terms: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if len(loss_terms) == 0:
+            raise ValueError("loss_terms must contain at least one loss")
+
+        total_loss = next(iter(loss_terms.values())).new_zeros(())
+        weighting_info: Dict[str, torch.Tensor] = {}
+
+        if self.use_homoscedastic_weighting:
+            for name, loss_val in loss_terms.items():
+                if name not in self.loss_log_vars:
+                    raise KeyError(f"Missing homoscedastic log-var parameter for loss term '{name}'")
+                log_var = self.loss_log_vars[name]
+                weighted_term = torch.exp(-log_var) * loss_val + log_var
+                total_loss = total_loss + weighted_term
+                weighting_info[f'log_var_{name}'] = log_var.detach()
+                weighting_info[f'weighted_{name}'] = weighted_term.detach()
+        else:
+            for name, loss_val in loss_terms.items():
+                total_loss = total_loss + loss_val
+                weighting_info[f'weighted_{name}'] = loss_val.detach()
+
+        return total_loss, weighting_info
+
     def assign_sources_to_voices(
         self,
         latent_sources: torch.Tensor,
@@ -398,13 +478,54 @@ class VCINModel(nn.Module):
 
             recon_y = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
             target_y = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
-            multi_stft_loss = multi_stft_loss + F.l1_loss(recon_y, target_y)
+            multi_stft_loss = multi_stft_loss + F.l1_loss(
+                torch.view_as_real(recon_y),
+                torch.view_as_real(target_y),
+            )
 
         if len(self.multi_stft_resolutions_window_sizes) > 0:
             multi_stft_loss = multi_stft_loss / float(len(self.multi_stft_resolutions_window_sizes))
 
         weighted = multi_stft_loss * self.multi_stft_resolution_loss_weight
         return l1 + weighted, l1, multi_stft_loss
+
+    def _compute_magnitude_penalty_loss(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        # L_MP discourages energy leakage from stem v into TF bins owned by u != v.
+        pred32 = pred.float()
+        target32 = target.float()
+
+        stft_kwargs = dict(
+            n_fft=self.magnitude_penalty_n_fft,
+            hop_length=self.magnitude_penalty_hop_length,
+            win_length=self.magnitude_penalty_win_length,
+            return_complex=True,
+            normalized=False,
+            window=self.multi_stft_window_fn(
+                self.magnitude_penalty_win_length,
+                device=device,
+                dtype=torch.float32,
+            ),
+        )
+
+        pred_spec = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **stft_kwargs)
+        target_spec = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **stft_kwargs)
+        pred_mag = pred_spec.abs()
+        target_mag = target_spec.abs()
+
+        bsz, num_voices, channels = pred32.shape[:3]
+        pred_mag = rearrange(pred_mag, '(b n s) f l -> b n s f l', b=bsz, n=num_voices, s=channels)
+        target_mag = rearrange(target_mag, '(b n s) f l -> b n s f l', b=bsz, n=num_voices, s=channels)
+
+        active_mask = (target_mag > self.magnitude_penalty_epsilon).to(dtype=pred_mag.dtype)
+        interferer_mask = active_mask.sum(dim=1, keepdim=True) - active_mask
+        interferer_mask = interferer_mask.clamp_min(0.0)
+
+        return (pred_mag * interferer_mask).mean()
 
     def _latent_regularizers(self, latent_sources: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # minimum latent energy penalty
@@ -443,6 +564,7 @@ class VCINModel(nn.Module):
 
         pitch_state = None
         gate_state = None
+        cgp_losses: List[torch.Tensor] = []
         source_embed = self._compute_source_embeddings(latent_sources, shared_hidden)
 
         for iter_idx in range(self.num_iterations):
@@ -485,6 +607,11 @@ class VCINModel(nn.Module):
                     gate_state = (1.0 - beta) * gate_state + beta * gate_prop
                 conditioning = conditioning * gate_state
 
+            if self.enable_cgp:
+                cgp_tokens, cgp_log_prob = self.cgp_adapter(conditioning)
+                cgp_losses.append(-cgp_log_prob.mean())
+                conditioning = conditioning + cgp_tokens
+
             if self.enable_film:
                 source_embed = self.film(source_embed, conditioning.mean(dim=1))
 
@@ -524,8 +651,14 @@ class VCINModel(nn.Module):
             voice_sel = voice_estimates
             target_sel = target
 
+        if self.training:
+            self._train_step += 1
+        train_step = int(self._train_step.item())
+
         stage2_loss, l1_stage2, stft_stage2 = self._compute_reconstruction_losses(voice_sel, target_sel, device)
-        total_loss = self.stage2_loss_weight * stage2_loss
+        loss_terms: Dict[str, torch.Tensor] = {}
+        if self.stage2_loss_weight > 0:
+            loss_terms['stage2'] = self.stage2_loss_weight * stage2_loss
 
         stage1_loss = voice_sel.new_zeros(())
         l1_stage1 = voice_sel.new_zeros(())
@@ -535,18 +668,42 @@ class VCINModel(nn.Module):
             if active_ids is not None:
                 stage1_voices = stage1_voices[:, active_ids]
             stage1_loss, l1_stage1, stft_stage1 = self._compute_reconstruction_losses(stage1_voices, target_sel, device)
-            total_loss = total_loss + self.stage1_loss_weight * stage1_loss
+            loss_terms['stage1'] = self.stage1_loss_weight * stage1_loss
 
         min_energy_loss, duplicate_loss = self._latent_regularizers(latent_sources)
         if self.min_energy_loss_weight > 0:
-            total_loss = total_loss + self.min_energy_loss_weight * min_energy_loss
+            loss_terms['min_energy'] = self.min_energy_loss_weight * min_energy_loss
         if self.duplicate_loss_weight > 0:
-            total_loss = total_loss + self.duplicate_loss_weight * duplicate_loss
+            loss_terms['duplicate'] = self.duplicate_loss_weight * duplicate_loss
 
         repulsion_loss = voice_sel.new_zeros(())
-        if self.enable_repulsion and self.repulsion_loss_weight > 0:
+        repulsion_scale = self.repulsion_loss_weight * self._linear_ramp_multiplier(
+            train_step, self.repulsion_warmup_steps
+        )
+        if self.enable_repulsion and repulsion_scale > 0:
             repulsion_loss = self.repulsion.repulsion_loss(source_embed)
-            total_loss = total_loss + self.repulsion_loss_weight * repulsion_loss
+            loss_terms['repulsion'] = repulsion_scale * repulsion_loss
+
+        cgp_loss = voice_sel.new_zeros(())
+        cgp_scale = self.cgp_loss_weight * self._linear_ramp_multiplier(
+            train_step, self.cgp_warmup_steps
+        )
+        if self.enable_cgp and len(cgp_losses) > 0:
+            cgp_loss = torch.stack(cgp_losses).mean()
+            if cgp_scale > 0:
+                loss_terms['cgp'] = cgp_scale * cgp_loss
+
+        magnitude_penalty_loss = voice_sel.new_zeros(())
+        magnitude_penalty_scale = self.magnitude_penalty_loss_weight * self._linear_ramp_multiplier(
+            train_step, self.magnitude_penalty_warmup_steps
+        )
+        if magnitude_penalty_scale > 0:
+            magnitude_penalty_loss = self._compute_magnitude_penalty_loss(voice_sel, target_sel, device)
+            loss_terms['magnitude_penalty'] = magnitude_penalty_scale * magnitude_penalty_loss
+
+        if len(loss_terms) == 0:
+            raise ValueError("No active loss terms. Check VCIN loss weights/config.")
+        total_loss, weighting_info = self._combine_loss_terms(loss_terms)
 
         if not return_loss_breakdown:
             return total_loss
@@ -559,5 +716,8 @@ class VCINModel(nn.Module):
             'min_energy': min_energy_loss,
             'duplicate': duplicate_loss,
             'repulsion': repulsion_loss,
+            'cgp': cgp_loss,
+            'magnitude_penalty': magnitude_penalty_loss,
         }
+        breakdown.update(weighting_info)
         return total_loss, breakdown

@@ -47,10 +47,18 @@ model:
   stage1_loss_weight: 1.0
   stage2_loss_weight: 1.0
   min_energy_epsilon: 1.0e-4
-  min_energy_loss_weight: 0.0
+  min_energy_loss_weight: 1.0e-3
   duplicate_cos_threshold: 0.95
-  duplicate_loss_weight: 0.0
-  repulsion_loss_weight: 0.0
+  duplicate_loss_weight: 1.0e-3
+  repulsion_loss_weight: 1.0e-3
+  cgp_loss_weight: 2.0e-2
+  magnitude_penalty_loss_weight: 2.0e-2
+  magnitude_penalty_epsilon: 1.0e-4
+  cgp_warmup_steps: 1000
+  repulsion_warmup_steps: 1000
+  magnitude_penalty_warmup_steps: 500
+  use_homoscedastic_weighting: true
+  homoscedastic_init: 0.0
   time_module_depth: 1
   freq_module_depth: 1
   mask_estimator_depth: 2
@@ -80,7 +88,7 @@ model:
   enable_assignment: true
   enable_gate: true
   enable_intent: true
-  enable_cgp: false
+  enable_cgp: true
   enable_film: true
   embed_dim: 64
 
