@@ -61,6 +61,7 @@ runtime_env_keys = [
     "START_CHECKPOINT",
     "GCP_SA_KEY_B64",
     "GCP_SA_KEY_JSON",
+    "SSH_PUBLIC_KEY",
 ]
 
 runtime_env = {}
