@@ -81,9 +81,12 @@ payload = {
     "supportPublicIp": as_bool(os.getenv("RUNPOD_SUPPORT_PUBLIC_IP"), True),
     "interruptible": as_bool(os.getenv("RUNPOD_INTERRUPTIBLE"), False),
     "ports": split_csv(os.getenv("RUNPOD_PORTS")),
-    "allowedCudaVersions": split_csv(os.getenv("RUNPOD_ALLOWED_CUDA_VERSIONS")),
     "env": runtime_env,
 }
+
+cuda_versions = split_csv(os.getenv("RUNPOD_ALLOWED_CUDA_VERSIONS"))
+if cuda_versions:
+    payload["allowedCudaVersions"] = cuda_versions
 
 if os.getenv("RUNPOD_CONTAINER_REGISTRY_AUTH_ID"):
     payload["containerRegistryAuthId"] = os.getenv("RUNPOD_CONTAINER_REGISTRY_AUTH_ID")
