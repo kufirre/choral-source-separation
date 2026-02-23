@@ -15,6 +15,7 @@ from ml_collections import ConfigDict
 from typing import List, Callable, Union
 import torch.distributed as dist
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+from torch.nn.parameter import UninitializedParameter
 
 from utils.settings import get_scheduler, parse_args_train, initialize_environment_ddp, \
     initialize_environment, get_model_from_config, wandb_init
@@ -89,6 +90,10 @@ def _get_amp_dtype(config: ConfigDict) -> torch.dtype:
     raise ValueError(
         f"Unsupported amp_dtype='{amp_dtype_name}'. Use one of: float16, bfloat16"
     )
+
+
+def _has_uninitialized_params(module: torch.nn.Module) -> bool:
+    return any(isinstance(param, UninitializedParameter) for param in module.parameters())
 
 
 def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids):
@@ -166,6 +171,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
     all_losses[f'epoch_{epoch}'] = []
     max_nonfinite_batches = int(getattr(config.training, 'max_nonfinite_batches_per_epoch', 0))
     nonfinite_batches = 0
+    ema_skip_warned = False
 
     normalize = getattr(config.training, 'normalize', False)
 
@@ -262,10 +268,14 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                 optimizer.step()
 
             if ema_model is not None:
-                if ddp:
-                    ema_model.update_parameters(model.module)
+                ema_source = model.module if ddp else model
+                if _has_uninitialized_params(ema_source):
+                    if should_print and not ema_skip_warned:
+                        print("Skipping EMA update: model still has uninitialized lazy parameters.")
+                        sys.stdout.flush()
+                        ema_skip_warned = True
                 else:
-                    ema_model.update_parameters(model)
+                    ema_model.update_parameters(ema_source)
 
             if scheduler.name in ['linear_scheduler']:
                 scheduler.step()
