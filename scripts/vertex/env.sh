@@ -13,6 +13,9 @@ export IMAGE_NAME="${IMAGE_NAME:-choral-source-separation}"
 export TAG="${TAG:-latest}"
 export DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 export DOCKERFILE_PATH="${DOCKERFILE_PATH:-scripts/Dockerfile}"
+export CLOUD_CACHE_BACKEND="${CLOUD_CACHE_BACKEND:-docker}"
+export KANIKO_CACHE_REPO="${KANIKO_CACHE_REPO:-}"
+export KANIKO_CACHE_TTL="${KANIKO_CACHE_TTL:-336h}"
 
 # Vertex compute defaults
 export MACHINE_TYPE="${MACHINE_TYPE:-a3-highgpu-1g}"

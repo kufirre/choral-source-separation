@@ -22,6 +22,10 @@ Environment:
   IMAGE_NAME        Image name
   TAG               Image tag
   CACHE_TAG         Cache source tag (default: latest)
+  CLOUD_CACHE_BACKEND
+                    cloud cache backend: docker or kaniko (default: docker)
+  KANIKO_CACHE_REPO Kaniko cache repository (default: <image>-cache)
+  KANIKO_CACHE_TTL  Kaniko cache TTL (default: 336h)
   DOCKER_PLATFORM   Docker target platform (default: linux/amd64)
   DOCKERFILE_PATH   Dockerfile path relative to repo root (default: scripts/Dockerfile)
   BUILD_MODE        Build backend: local or cloud (default: cloud)
@@ -37,6 +41,7 @@ CACHE_TAG="${CACHE_TAG:-latest}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 BUILD_MODE="${BUILD_MODE:-cloud}"
 DOCKERFILE_PATH="${DOCKERFILE_PATH:-scripts/Dockerfile}"
+CLOUD_CACHE_BACKEND="${CLOUD_CACHE_BACKEND:-docker}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -93,6 +98,9 @@ fi
 
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${TAG}"
 CACHE_IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${CACHE_TAG}"
+KANIKO_CACHE_REPO_DEFAULT="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}-cache"
+KANIKO_CACHE_REPO="${KANIKO_CACHE_REPO:-${KANIKO_CACHE_REPO_DEFAULT}}"
+KANIKO_CACHE_TTL="${KANIKO_CACHE_TTL:-336h}"
 echo "Using dockerfile: ${DOCKERFILE_REL}"
 echo "Image URI: ${IMAGE_URI}"
 echo "Cache image URI: ${CACHE_IMAGE_URI}"
@@ -123,7 +131,38 @@ case "${BUILD_MODE}" in
     cloud)
         build_config_file="$(mktemp)"
         trap 'rm -f "${build_config_file}"' EXIT
-        cat >"${build_config_file}" <<EOF
+        if [[ "${CLOUD_CACHE_BACKEND}" == "kaniko" ]]; then
+            cat >"${build_config_file}" <<EOF
+steps:
+  - name: gcr.io/kaniko-project/executor:latest
+    args:
+      - --context=dir://.
+      - --dockerfile=${DOCKERFILE_REL}
+      - --destination=${IMAGE_URI}
+      - --cache=true
+      - --cache-copy-layers=true
+      - --cache-ttl=${KANIKO_CACHE_TTL}
+      - --cache-repo=${KANIKO_CACHE_REPO}
+EOF
+            if [[ "${CACHE_IMAGE_URI}" != "${IMAGE_URI}" ]]; then
+                cat >>"${build_config_file}" <<EOF
+      - --destination=${CACHE_IMAGE_URI}
+EOF
+            fi
+            cat >>"${build_config_file}" <<EOF
+images:
+  - ${IMAGE_URI}
+EOF
+            if [[ "${CACHE_IMAGE_URI}" != "${IMAGE_URI}" ]]; then
+                cat >>"${build_config_file}" <<EOF
+  - ${CACHE_IMAGE_URI}
+EOF
+            fi
+            echo "Cloud cache backend: kaniko"
+            echo "Kaniko cache repo: ${KANIKO_CACHE_REPO}"
+            echo "Kaniko cache ttl: ${KANIKO_CACHE_TTL}"
+        elif [[ "${CLOUD_CACHE_BACKEND}" == "docker" ]]; then
+            cat >"${build_config_file}" <<EOF
 steps:
   - name: gcr.io/cloud-builders/docker
     entrypoint: bash
@@ -152,10 +191,15 @@ EOF
 images:
   - ${IMAGE_URI}
 EOF
-        if [[ "${CACHE_IMAGE_URI}" != "${IMAGE_URI}" ]]; then
-            cat >>"${build_config_file}" <<EOF
+            if [[ "${CACHE_IMAGE_URI}" != "${IMAGE_URI}" ]]; then
+                cat >>"${build_config_file}" <<EOF
   - ${CACHE_IMAGE_URI}
 EOF
+            fi
+            echo "Cloud cache backend: docker"
+        else
+            echo "Invalid CLOUD_CACHE_BACKEND: ${CLOUD_CACHE_BACKEND}. Use docker or kaniko." >&2
+            exit 1
         fi
         gcloud builds submit \
             --project "${PROJECT_ID}" \
