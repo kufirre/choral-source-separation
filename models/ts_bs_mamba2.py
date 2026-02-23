@@ -32,7 +32,7 @@ class MambaBlock(nn.Module):
             expand=4,  
             headdim=64,
         )
-    def forward(self, input, return_aux=False):
+    def forward(self, input):
         forward_f = input
         forward_f_output = self.forward_mamba2(forward_f)
         backward_f = torch.flip(input, [1])

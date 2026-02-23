@@ -449,7 +449,11 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
             and args.load_only_compatible_weights
             and hasattr(model, 'load_backbone_weights')
         ):
-            model.load_backbone_weights(args.start_check_point, verbose=True)
+            model.load_backbone_weights(
+                checkpoint,
+                checkpoint_path=args.start_check_point,
+                verbose=True,
+            )
         else:
             load_start_checkpoint(args, model, checkpoint, type_='train')
     model = get_lora(args, config, model)
@@ -583,11 +587,11 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
         if should_print:
             save_last_weights(args, model, device_ids, optimizer, epoch, all_time_all_metrics, best_metric, scheduler)
         if ddp:
-            metrics_avg, all_metrics = valid_multi_gpu(model, args, config, args.device_ids, verbose=False)
+            metrics_avg, all_metrics = valid_multi_gpu(model_to_valid, args, config, args.device_ids, verbose=False)
             if rank == 0:
                 all_time_all_metrics[f"epoch_{epoch}"] = all_metrics
                 best_metric = compute_epoch_metrics(
-                    model=model,
+                    model=model_to_valid,
                     args=args,
                     config=config,
                     device=device,
@@ -605,7 +609,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
         else:
             prev_best_metric = best_metric
             best_metric = compute_epoch_metrics(
-                model=model,
+                model=model_to_valid,
                 args=args,
                 config=config,
                 device=device,

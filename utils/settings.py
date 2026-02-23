@@ -118,8 +118,15 @@ def parse_args_train(dict_args: Union[argparse.Namespace, Dict, None]) -> argpar
     if args.metric_for_scheduler not in args.metrics:
         args.metrics += [args.metric_for_scheduler]
 
-    get_internal_loss = (args.model_type in ('mel_band_conformer',) or 'roformer' in args.model_type
-                         ) and not args.use_standard_loss
+    get_internal_loss = (
+        args.model_type in (
+            'mel_band_roformer',
+            'bs_roformer',
+            'vcin',
+            'mel_band_conformer',
+            'bs_conformer',
+        )
+    ) and not args.use_standard_loss
     if get_internal_loss:
         args.loss = [f'{args.model_type}_loss']
     return args

@@ -10,7 +10,7 @@ Architecture-focused implementation:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -256,8 +256,19 @@ class VCINModel(nn.Module):
                 return ckpt
         raise ValueError('Checkpoint does not contain a recognizable state_dict')
 
-    def load_backbone_weights(self, checkpoint_path: str, verbose: bool = True):
-        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    def load_backbone_weights(
+        self,
+        checkpoint_source: Union[str, Dict[str, Any]],
+        checkpoint_path: Optional[str] = None,
+        verbose: bool = True,
+    ):
+        if isinstance(checkpoint_source, str):
+            ckpt = torch.load(checkpoint_source, map_location='cpu', weights_only=False)
+            checkpoint_label = checkpoint_source
+        else:
+            ckpt = checkpoint_source
+            checkpoint_label = checkpoint_path if checkpoint_path is not None else '<in-memory checkpoint>'
+
         state = self._extract_state_dict(ckpt)
 
         if self.backbone_type == 'ts_bsmamba2':
@@ -274,13 +285,23 @@ class VCINModel(nn.Module):
                     chosen = cand
                     break
             if chosen is None:
+                if any(
+                    k.startswith('band_split.')
+                    or k.startswith('layers.')
+                    or k.startswith('mask_estimators.')
+                    for k in state.keys()
+                ):
+                    raise ValueError(
+                        'Checkpoint appears to contain BSMamba2Model weights, '
+                        'which are incompatible with the TS-BSMamba2 Separator backbone.'
+                    )
                 raise ValueError('No TS-BSMamba2 separator keys found in checkpoint')
 
             missing, unexpected = self.backbone.load_ts_state_dict(chosen)
             loaded_count = len(chosen) - len(unexpected)
             if verbose:
                 print(
-                    f"Loaded TS-BSMamba2 backbone from {checkpoint_path}: "
+                    f"Loaded TS-BSMamba2 backbone from {checkpoint_label}: "
                     f"loaded={loaded_count}, missing={len(missing)}, unexpected={len(unexpected)}"
                 )
             if loaded_count <= 0:
