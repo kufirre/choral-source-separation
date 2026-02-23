@@ -14,13 +14,12 @@ training:
   normalize: true
   instruments: ['S', 'A', 'T', 'B']
   target_instrument: null
-  num_epochs: 80
-  num_steps: 300
+  num_epochs: 2
+  num_steps: 50
   optimizer: prodigy
   lr: 0.03
-  patience: 6
-  reduce_factor: 0.8
-  early_stopping_patience: 18
+  patience: 2
+  reduce_factor: 0.95
   q: 0.95
   coarse_loss_clip: true
   max_nonfinite_batches_per_epoch: 0
@@ -60,6 +59,7 @@ model:
   - 256
   multi_stft_hop_size: 147
   multi_stft_normalized: false
+  # VCIN module flags
   enable_repulsion: true
   enable_pitch: true
   enable_assignment: true

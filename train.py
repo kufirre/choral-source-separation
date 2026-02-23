@@ -152,6 +152,8 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
     loss_val = 0.
     total = 0
     all_losses[f'epoch_{epoch}'] = []
+    max_nonfinite_batches = int(getattr(config.training, 'max_nonfinite_batches_per_epoch', 0))
+    nonfinite_batches = 0
 
     normalize = getattr(config.training, 'normalize', False)
 
@@ -192,6 +194,23 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
         else:
             with torch.cuda.amp.autocast(enabled=use_amp):
                 loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
+
+        # Fail fast on NaN / Inf instead of silently poisoning the whole epoch.
+        if not torch.isfinite(loss):
+            nonfinite_batches += 1
+            if should_print:
+                print(
+                    f"Non-finite loss at epoch {epoch} step {i} "
+                    f"(count {nonfinite_batches})."
+                )
+                sys.stdout.flush()
+            optimizer.zero_grad(set_to_none=True)
+            if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
+                raise FloatingPointError(
+                    f"Too many non-finite losses in epoch {epoch}: {nonfinite_batches}"
+                )
+            continue
+
         loss /= gradient_accumulation_steps
         scaler.scale(loss).backward()
 
@@ -199,8 +218,26 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
 
             scaler.unscale_(optimizer)
 
+            grad_norm = None
             if config.training.grad_clip:
-                nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
+
+            if grad_norm is not None:
+                grad_norm_value = float(grad_norm.detach().cpu().item() if torch.is_tensor(grad_norm) else grad_norm)
+                if not np.isfinite(grad_norm_value):
+                    nonfinite_batches += 1
+                    if should_print:
+                        print(
+                            f"Non-finite grad norm at epoch {epoch} step {i} "
+                            f"(count {nonfinite_batches})."
+                        )
+                        sys.stdout.flush()
+                    optimizer.zero_grad(set_to_none=True)
+                    if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
+                        raise FloatingPointError(
+                            f"Too many non-finite gradients in epoch {epoch}: {nonfinite_batches}"
+                        )
+                    continue
 
             scaler.step(optimizer)
             scaler.update()
@@ -462,6 +499,10 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
     else:
         all_losses = {}
 
+    early_stopping_patience = int(getattr(config.training, 'early_stopping_patience', 0))
+    enable_early_stopping = (not ddp) and early_stopping_patience > 0
+    no_improve_epochs = 0
+
     multi_loss = choice_loss(args, config)
     scaler = GradScaler()
 
@@ -533,6 +574,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
                     all_metrics=all_metrics
                 )
         else:
+            prev_best_metric = best_metric
             best_metric = compute_epoch_metrics(
                 model=model,
                 args=args,
@@ -546,6 +588,21 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
                 all_time_all_metrics=all_time_all_metrics,
                 all_losses=all_losses,
             )
+
+            if enable_early_stopping:
+                if best_metric > prev_best_metric:
+                    no_improve_epochs = 0
+                else:
+                    no_improve_epochs += 1
+
+                if no_improve_epochs >= early_stopping_patience:
+                    if should_print:
+                        print(
+                            f"Early stopping at epoch {epoch}: "
+                            f"no {args.metric_for_scheduler} improvement in "
+                            f"{no_improve_epochs} epochs."
+                        )
+                    break
 
 
 if __name__ == "__main__":
