@@ -20,7 +20,8 @@ export RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-${RUNPOD_POD_NAME_PREFIX}-$(date +%Y%
 
 export RUNPOD_CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-100}"
 export RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-100}"
-export RUNPOD_VOLUME_MOUNT_PATH="${RUNPOD_VOLUME_MOUNT_PATH:-/workspace}"
+# Do not mount over /workspace; the image code lives at /workspace/choral-source-separation.
+export RUNPOD_VOLUME_MOUNT_PATH="${RUNPOD_VOLUME_MOUNT_PATH:-/runpod-volume}"
 export RUNPOD_SUPPORT_PUBLIC_IP="${RUNPOD_SUPPORT_PUBLIC_IP:-true}"
 export RUNPOD_PORTS="${RUNPOD_PORTS:-22/tcp}"
 export RUNPOD_DATA_CENTER_IDS="${RUNPOD_DATA_CENTER_IDS:-}"
@@ -35,5 +36,8 @@ export RUN_ID="${RUN_ID:-${RUNPOD_POD_NAME}}"
 # Optional: pass a GCP service-account key to enable gcloud storage sync in non-Vertex runtimes.
 export GCP_SA_KEY_B64="${GCP_SA_KEY_B64:-}"
 export GCP_SA_KEY_JSON="${GCP_SA_KEY_JSON:-}"
-export GCP_SA_KEY_FILE="${GCP_SA_KEY_FILE:-$HOME/.config/runpod/runpod-gar-pull-key.json}"
+# Runtime destination path inside container.
+export GCP_SA_KEY_FILE="${GCP_SA_KEY_FILE:-/tmp/gcp-service-account.json}"
+# Local source key path used by submit script to populate GCP_SA_KEY_B64.
+export GCP_SA_KEY_SOURCE_FILE="${GCP_SA_KEY_SOURCE_FILE:-$HOME/.config/runpod/runpod-gar-pull-key.json}"
 export SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"

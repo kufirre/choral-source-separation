@@ -229,7 +229,7 @@ class Separator(nn.Module):
 
         return input, rest
         
-    def forward(self, input):
+    def forward(self, input, return_aux=False):
         # input shape: (B, C, T)
 
         batch_size, nch, nsample = input.shape

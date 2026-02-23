@@ -57,6 +57,12 @@ main() {
         fi
     done
 
+    if [[ "${RUNPOD_VOLUME_MOUNT_PATH:-}" == "/workspace" ]]; then
+        echo "[runpod-validate] RUNPOD_VOLUME_MOUNT_PATH=/workspace will hide image code and break entrypoint startup." >&2
+        echo "[runpod-validate] Set RUNPOD_VOLUME_MOUNT_PATH to a non-overlapping path (for example /runpod-volume)." >&2
+        failed=1
+    fi
+
     if [[ "${failed}" -ne 0 ]]; then
         exit 1
     fi

@@ -61,6 +61,7 @@ runtime_env_keys = [
     "START_CHECKPOINT",
     "GCP_SA_KEY_B64",
     "GCP_SA_KEY_JSON",
+    "GCP_SA_KEY_FILE",
     "SSH_PUBLIC_KEY",
 ]
 
@@ -74,7 +75,9 @@ if (
     "GCP_SA_KEY_B64" not in runtime_env
     and "GCP_SA_KEY_JSON" not in runtime_env
 ):
-    key_file = os.getenv("GCP_SA_KEY_FILE", "")
+    key_file = os.getenv("GCP_SA_KEY_SOURCE_FILE", "")
+    if not key_file:
+        key_file = os.getenv("GCP_SA_KEY_FILE", "")
     if key_file and os.path.exists(key_file):
         import base64
         with open(key_file, "rb") as f:

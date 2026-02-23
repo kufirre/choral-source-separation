@@ -14,6 +14,7 @@ ARTIFACT_SYNC_SECONDS="${ARTIFACT_SYNC_SECONDS:-60}"
 GCP_SA_KEY_B64="${GCP_SA_KEY_B64:-}"
 GCP_SA_KEY_JSON="${GCP_SA_KEY_JSON:-}"
 GCP_SA_KEY_FILE="${GCP_SA_KEY_FILE:-/tmp/gcp-service-account.json}"
+export GCP_SA_KEY_FILE
 
 trim() {
     local value="$1"
@@ -94,7 +95,8 @@ activate_gcp_service_account() {
         python3 - <<'PY'
 import base64
 import os
-with open(os.environ["GCP_SA_KEY_FILE"], "wb") as f:
+key_file = os.getenv("GCP_SA_KEY_FILE", "/tmp/gcp-service-account.json")
+with open(key_file, "wb") as f:
     f.write(base64.b64decode(os.environ["GCP_SA_KEY_B64"]))
 PY
     elif [[ -n "${GCP_SA_KEY_JSON}" ]]; then
