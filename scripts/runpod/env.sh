@@ -35,3 +35,4 @@ export RUN_ID="${RUN_ID:-${RUNPOD_POD_NAME}}"
 # Optional: pass a GCP service-account key to enable gcloud storage sync in non-Vertex runtimes.
 export GCP_SA_KEY_B64="${GCP_SA_KEY_B64:-}"
 export GCP_SA_KEY_JSON="${GCP_SA_KEY_JSON:-}"
+export GCP_SA_KEY_FILE="${GCP_SA_KEY_FILE:-$HOME/.config/runpod/runpod-gar-pull-key.json}"

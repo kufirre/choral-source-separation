@@ -69,6 +69,16 @@ for k in runtime_env_keys:
     if v is not None and v != "":
         runtime_env[k] = v
 
+if (
+    "GCP_SA_KEY_B64" not in runtime_env
+    and "GCP_SA_KEY_JSON" not in runtime_env
+):
+    key_file = os.getenv("GCP_SA_KEY_FILE", "")
+    if key_file and os.path.exists(key_file):
+        import base64
+        with open(key_file, "rb") as f:
+            runtime_env["GCP_SA_KEY_B64"] = base64.b64encode(f.read()).decode("utf-8")
+
 payload = {
     "name": os.environ["RUNPOD_POD_NAME"],
     "imageName": os.environ["IMAGE_URI"],
