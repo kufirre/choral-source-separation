@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from ml_collections import ConfigDict
 from torch.optim import Adam, AdamW, SGD, RAdam, RMSprop
+from torch.nn.parameter import UninitializedParameter
 from tqdm.auto import tqdm
 from typing import Dict, List, Tuple, Any, Union, Optional
 import loralib as lora
@@ -678,6 +679,14 @@ def bind_lora_to_model(config: Dict[str, Any], model: nn.Module) -> nn.Module:
 
 def log_model_info(model: torch.nn.Module, results_path=None):
     """Log comprehensive model information"""
+    def _safe_numel(param: torch.Tensor) -> Tuple[int, bool]:
+        if isinstance(param, UninitializedParameter):
+            return 0, True
+        try:
+            return param.numel(), False
+        except ValueError:
+            return 0, True
+
     model_info = {
         "timestamp": datetime.now().isoformat(),
         "model_class": model.__class__.__name__,
@@ -685,8 +694,16 @@ def log_model_info(model: torch.nn.Module, results_path=None):
     }
 
     # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = 0
+    trainable_params = 0
+    uninitialized_params = 0
+    for param in model.parameters():
+        param_numel, is_uninitialized = _safe_numel(param)
+        total_params += param_numel
+        if param.requires_grad:
+            trainable_params += param_numel
+        if is_uninitialized:
+            uninitialized_params += 1
 
     model_info["parameters"] = {
         "total": total_params,
@@ -694,6 +711,7 @@ def log_model_info(model: torch.nn.Module, results_path=None):
         "non_trainable": total_params - trainable_params,
         "total_millions": round(total_params / 1e6, 2),
         "trainable_millions": round(trainable_params / 1e6, 2),
+        "uninitialized_count": uninitialized_params,
     }
 
     # Get model size in memory
@@ -701,7 +719,10 @@ def log_model_info(model: torch.nn.Module, results_path=None):
     buffer_size = 0
 
     for param in model.parameters():
-        param_size += param.nelement() * param.element_size()
+        param_numel, is_uninitialized = _safe_numel(param)
+        if is_uninitialized:
+            continue
+        param_size += param_numel * param.element_size()
 
     for buffer in model.buffers():
         buffer_size += buffer.nelement() * buffer.element_size()
@@ -718,7 +739,10 @@ def log_model_info(model: torch.nn.Module, results_path=None):
     layer_info = []
     for name, module in model.named_modules():
         if len(list(module.children())) == 0:  # Only leaf modules
-            layer_params = sum(p.numel() for p in module.parameters())
+            layer_params = 0
+            for param in module.parameters():
+                param_numel, _ = _safe_numel(param)
+                layer_params += param_numel
             if layer_params > 0:
                 layer_info.append({
                     "name": name,
@@ -743,6 +767,10 @@ def log_model_info(model: torch.nn.Module, results_path=None):
             f"Trainable parameters: {model_info['parameters']['trainable']:,} ({model_info['parameters']['trainable_millions']}M)")
         print(f"Model size: {model_info['memory']['total_mb']:.2f} MB")
         print(f"Number of layers: {len(layer_info)}")
+        if uninitialized_params > 0:
+            print(
+                f"Note: {uninitialized_params} lazy parameter(s) are uninitialized and excluded from pre-forward counts."
+            )
 
 
 def save_weights(
