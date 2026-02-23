@@ -11,6 +11,9 @@ USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 BOOTSTRAP_CKPT_URI="${BOOTSTRAP_CKPT_URI:-}"
 BOOTSTRAP_CKPT_LOCAL_PATH="${BOOTSTRAP_CKPT_LOCAL_PATH:-${DATA_ROOT}/bootstrap/start_checkpoint.ckpt}"
 ARTIFACT_SYNC_SECONDS="${ARTIFACT_SYNC_SECONDS:-60}"
+GCP_SA_KEY_B64="${GCP_SA_KEY_B64:-}"
+GCP_SA_KEY_JSON="${GCP_SA_KEY_JSON:-}"
+GCP_SA_KEY_FILE="${GCP_SA_KEY_FILE:-/tmp/gcp-service-account.json}"
 
 trim() {
     local value="$1"
@@ -82,10 +85,35 @@ cleanup_on_exit() {
 }
 trap cleanup_on_exit EXIT
 
+activate_gcp_service_account() {
+    if ! command -v gcloud >/dev/null 2>&1; then
+        return
+    fi
+
+    if [[ -n "${GCP_SA_KEY_B64}" ]]; then
+        python3 - <<'PY'
+import base64
+import os
+with open(os.environ["GCP_SA_KEY_FILE"], "wb") as f:
+    f.write(base64.b64decode(os.environ["GCP_SA_KEY_B64"]))
+PY
+    elif [[ -n "${GCP_SA_KEY_JSON}" ]]; then
+        printf '%s\n' "${GCP_SA_KEY_JSON}" > "${GCP_SA_KEY_FILE}"
+    fi
+
+    if [[ -s "${GCP_SA_KEY_FILE}" ]]; then
+        gcloud auth activate-service-account --key-file="${GCP_SA_KEY_FILE}" >/dev/null
+        export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEY_FILE}"
+        echo "[entrypoint] Activated GCP service account credentials."
+    fi
+}
+
 mkdir -p "${LOCAL_ARTIFACT_DIR}"
 mkdir -p "${LOCAL_ARTIFACT_DIR}/tb"
 mkdir -p "${DATA_ROOT}"
 mkdir -p data
+
+activate_gcp_service_account
 
 if [[ -n "${GCS_DATA_BUCKET:-}" ]]; then
     if [[ -n "${DATASET_GCS_PATHS}" ]]; then
