@@ -493,10 +493,18 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
 
     ema_model = None
     if hasattr(config.training, 'ema_momentum') and config.training.ema_momentum > 0:
-        from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-        if not dist.is_initialized() or dist.get_rank() == 0:
-            print(f"Initializing EMA with decay: {config.training.ema_momentum}")
-        ema_model = AveragedModel(model_module, multi_avg_fn=get_ema_multi_avg_fn(config.training.ema_momentum))
+        has_lazy_params = _has_uninitialized_params(model_module)
+        if has_lazy_params:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                print(
+                    f"Skipping EMA init (decay {config.training.ema_momentum}): "
+                    "model has uninitialized lazy parameters at startup."
+                )
+        else:
+            from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                print(f"Initializing EMA with decay: {config.training.ema_momentum}")
+            ema_model = AveragedModel(model_module, multi_avg_fn=get_ema_multi_avg_fn(config.training.ema_momentum))
         
     if args.pre_valid:
         model_to_valid = ema_model if ema_model is not None else model
