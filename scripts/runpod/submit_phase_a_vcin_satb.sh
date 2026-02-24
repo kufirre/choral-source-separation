@@ -8,8 +8,17 @@ if [[ -f "${SCRIPT_DIR}/env.sh" ]]; then
     source "${SCRIPT_DIR}/env.sh"
 fi
 
-RUN_ID="${RUN_ID:-phase-a-vcin-satb-$(date +%Y%m%d-%H%M%S)}"
-RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-${RUN_ID}}"
+new_run_id() {
+    printf 'phase-a-vcin-satb-%s-%04d' "$(date +%Y%m%d-%H%M%S)" "$((RANDOM % 10000))"
+}
+
+if [[ "${FORCE_NEW_RUN_ID:-true}" == "true" ]]; then
+    RUN_ID="${RUN_ID:-$(new_run_id)}"
+    RUNPOD_POD_NAME="${RUN_ID}"
+else
+    RUN_ID="${RUN_ID:-$(new_run_id)}"
+    RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-${RUN_ID}}"
+fi
 
 MODEL_TYPE="${MODEL_TYPE:-vcin}"
 CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a.yaml}"

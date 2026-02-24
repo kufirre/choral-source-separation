@@ -14,6 +14,10 @@ ARTIFACT_SYNC_SECONDS="${ARTIFACT_SYNC_SECONDS:-60}"
 GCP_SA_KEY_B64="${GCP_SA_KEY_B64:-}"
 GCP_SA_KEY_JSON="${GCP_SA_KEY_JSON:-}"
 GCP_SA_KEY_FILE="${GCP_SA_KEY_FILE:-/tmp/gcp-service-account.json}"
+RUNPOD_AUTO_TERMINATE_ON_EXIT="${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}"
+RUNPOD_API_BASE="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
+RUNPOD_API_KEY="${RUNPOD_API_KEY:-}"
+RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-}"
 export GCP_SA_KEY_FILE
 
 trim() {
@@ -76,12 +80,68 @@ background_sync_loop() {
     done
 }
 
+terminate_runpod_pod() {
+    if [[ "${RUNPOD_AUTO_TERMINATE_ON_EXIT}" != "true" ]]; then
+        return 0
+    fi
+    if [[ -z "${RUNPOD_API_KEY}" || -z "${RUNPOD_POD_NAME}" ]]; then
+        echo "[entrypoint] RUNPOD_AUTO_TERMINATE_ON_EXIT=true but RUNPOD_API_KEY/RUNPOD_POD_NAME is missing; skipping pod termination."
+        return 0
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[entrypoint] curl not found; skipping pod termination."
+        return 0
+    fi
+
+    local pods_json pod_id
+    pods_json="$(curl -sS --fail-with-body \
+        -X GET "${RUNPOD_API_BASE%/}/pods" \
+        -H "Authorization: Bearer ${RUNPOD_API_KEY}" 2>/dev/null || true)"
+    if [[ -z "${pods_json}" ]]; then
+        echo "[entrypoint] Could not query RunPod API for pod termination."
+        return 0
+    fi
+
+    pod_id="$(RUNPOD_PODS_JSON="${pods_json}" RUNPOD_POD_NAME="${RUNPOD_POD_NAME}" python3 - <<'PY'
+import json
+import os
+
+pod_name = os.getenv("RUNPOD_POD_NAME", "")
+pod_id = ""
+try:
+    pods = json.loads(os.getenv("RUNPOD_PODS_JSON", "[]"))
+except json.JSONDecodeError:
+    pods = []
+
+for pod in pods:
+    if isinstance(pod, dict) and pod.get("name") == pod_name:
+        pod_id = str(pod.get("id", ""))
+        break
+
+print(pod_id)
+PY
+)"
+    if [[ -z "${pod_id}" ]]; then
+        echo "[entrypoint] Pod ${RUNPOD_POD_NAME} not found in RunPod API response; skipping pod termination."
+        return 0
+    fi
+
+    if curl -sS --fail-with-body \
+        -X DELETE "${RUNPOD_API_BASE%/}/pods/${pod_id}" \
+        -H "Authorization: Bearer ${RUNPOD_API_KEY}" >/dev/null 2>&1; then
+        echo "[entrypoint] Requested RunPod termination for pod ${pod_id} (${RUNPOD_POD_NAME})."
+    else
+        echo "[entrypoint] Failed to terminate RunPod pod ${pod_id} (${RUNPOD_POD_NAME})."
+    fi
+}
+
 cleanup_on_exit() {
     local exit_code=$?
     if [[ -n "${SYNC_PID:-}" ]]; then
         kill "${SYNC_PID}" 2>/dev/null || true
     fi
     sync_artifacts_to_gcs
+    terminate_runpod_pod || true
     exit "${exit_code}"
 }
 trap cleanup_on_exit EXIT

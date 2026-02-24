@@ -18,7 +18,9 @@ if [[ -z "${TRAIN_CMD}" ]]; then
     exit 1
 fi
 
-RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-${RUNPOD_POD_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)}"
+if [[ -z "${RUNPOD_POD_NAME:-}" ]]; then
+    RUNPOD_POD_NAME="${RUNPOD_POD_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)-$((RANDOM % 10000))"
+fi
 RUN_ID="${RUN_ID:-${RUNPOD_POD_NAME}}"
 
 build_payload() {
@@ -49,6 +51,8 @@ def split_csv(value: str):
 runtime_env_keys = [
     "RUN_ID",
     "TRAIN_CMD",
+    "RUNPOD_POD_NAME",
+    "RUNPOD_AUTO_TERMINATE_ON_EXIT",
     "GCS_DATA_BUCKET",
     "GCS_ARTIFACT_BUCKET",
     "DATA_ROOT",
@@ -70,6 +74,12 @@ for k in runtime_env_keys:
     v = os.getenv(k)
     if v is not None and v != "":
         runtime_env[k] = v
+
+auto_terminate = as_bool(os.getenv("RUNPOD_AUTO_TERMINATE_ON_EXIT"), False)
+if auto_terminate:
+    runtime_env["RUNPOD_API_BASE"] = os.getenv("RUNPOD_API_BASE", "https://rest.runpod.io/v1")
+    if os.getenv("RUNPOD_API_KEY"):
+        runtime_env["RUNPOD_API_KEY"] = os.getenv("RUNPOD_API_KEY")
 
 if (
     "GCP_SA_KEY_B64" not in runtime_env
@@ -130,7 +140,7 @@ import json
 import os
 
 payload = json.loads(os.environ["RUNPOD_PAYLOAD"])
-for k in ("HF_TOKEN", "GCP_SA_KEY_B64", "GCP_SA_KEY_JSON"):
+for k in ("HF_TOKEN", "GCP_SA_KEY_B64", "GCP_SA_KEY_JSON", "RUNPOD_API_KEY"):
     if isinstance(payload.get("env"), dict) and k in payload["env"]:
         payload["env"][k] = "***REDACTED***"
 print(json.dumps(payload, indent=4))
@@ -144,13 +154,23 @@ RESPONSE="$(curl -sS --fail-with-body \
     -H "Content-Type: application/json" \
     -d "${PAYLOAD}")"
 
-printf '%s\n' "${RESPONSE}" > "${RUNPOD_DIR}/last_pod_response.json"
-
-POD_ID="$(python3 - <<'PY' "${RUNPOD_DIR}/last_pod_response.json"
+RUNPOD_RESPONSE="${RESPONSE}" python3 - <<'PY' > "${RUNPOD_DIR}/last_pod_response.json"
 import json
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    data = json.load(f)
+import os
+
+response = json.loads(os.environ["RUNPOD_RESPONSE"])
+env = response.get("env")
+if isinstance(env, dict):
+    for key in ("HF_TOKEN", "GCP_SA_KEY_B64", "GCP_SA_KEY_JSON", "RUNPOD_API_KEY"):
+        if key in env:
+            env[key] = "***REDACTED***"
+print(json.dumps(response))
+PY
+
+POD_ID="$(RUNPOD_RESPONSE="${RESPONSE}" python3 - <<'PY'
+import json
+import os
+data = json.loads(os.environ["RUNPOD_RESPONSE"])
 print(data.get("id", ""))
 PY
 )"
