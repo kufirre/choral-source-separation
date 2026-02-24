@@ -34,6 +34,9 @@ START_CHECKPOINT="${START_CHECKPOINT:-}"
 CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_only_compatible_weights}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
 BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-bash scripts/runpod/bootstrap_train_env.sh}"
+RUNPOD_REPO_URL="${RUNPOD_REPO_URL:-https://github.com/kufirre/choral-source-separation.git}"
+RUNPOD_GIT_REF="${RUNPOD_GIT_REF:-vcin-dev}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace/choral-source-separation}"
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
     export BOOTSTRAP_CKPT_URI="${BOOTSTRAP_CKPT_URI:-${START_CHECKPOINT}}"
@@ -49,7 +52,7 @@ if [[ ! -f "${CONFIG_PATH_CHECK}" ]]; then
     exit 1
 fi
 
-TRAIN_CMD_DEFAULT="${BOOTSTRAP_CMD} && python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
+TRAIN_CMD_DEFAULT="set -euo pipefail; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD} && python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
 if [[ -n "${START_CHECKPOINT}" ]]; then
     TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
 fi

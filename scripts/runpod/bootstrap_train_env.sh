@@ -45,6 +45,7 @@ sync_dataset_path() {
 
 activate_gcp_service_account() {
     local key_file
+    local active_account
     key_file="${GCP_SA_KEY_FILE:-/tmp/gcp-service-account.json}"
 
     if ! command -v gcloud >/dev/null 2>&1; then
@@ -68,12 +69,15 @@ PY
     if [[ -s "${key_file}" ]]; then
         gcloud auth activate-service-account --key-file="${key_file}" >/dev/null
         export GOOGLE_APPLICATION_CREDENTIALS="${key_file}"
-        echo "[runpod-bootstrap] Activated GCP service account."
-        return 0
+        active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n 1)"
+        if [[ -n "${active_account}" ]]; then
+            echo "[runpod-bootstrap] Activated GCP service account: ${active_account}"
+            return 0
+        fi
     fi
 
-    echo "[runpod-bootstrap] No service-account key provided; sync commands may fail." >&2
-    return 0
+    echo "[runpod-bootstrap] No active gcloud account after auth setup." >&2
+    return 1
 }
 
 download_bootstrap_checkpoint() {
