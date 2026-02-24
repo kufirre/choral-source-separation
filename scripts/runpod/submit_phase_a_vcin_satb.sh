@@ -27,7 +27,10 @@ TRAIN_DATA_PATHS="${TRAIN_DATA_PATHS:-/gcs_data/processed/CSD_satb}"
 VALID_DATA_PATHS="${VALID_DATA_PATHS:-/gcs_data/processed/Cantoria_satb}"
 DATASET_GCS_PATHS="${DATASET_GCS_PATHS:-processed/CSD_satb,processed/Cantoria_satb}"
 RESULTS_PATH="${RESULTS_PATH:-artifacts/${RUN_ID}}"
-NUM_WORKERS="${NUM_WORKERS:-8}"
+NUM_WORKERS="${NUM_WORKERS:-12}"
+PIN_MEMORY="${PIN_MEMORY:-true}"
+PERSISTENT_WORKERS="${PERSISTENT_WORKERS:-true}"
+PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 DEVICE_IDS="${DEVICE_IDS:-0}"
 USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 START_CHECKPOINT="${START_CHECKPOINT:-}"
@@ -52,10 +55,23 @@ if [[ ! -f "${CONFIG_PATH_CHECK}" ]]; then
     exit 1
 fi
 
-TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS} 2>&1 | tee ${RESULTS_PATH}/train.log"
-if [[ -n "${START_CHECKPOINT}" ]]; then
-    TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
+DATALOADER_ARGS="--num_workers ${NUM_WORKERS}"
+if [[ "${PIN_MEMORY}" == "true" ]]; then
+    DATALOADER_ARGS="${DATALOADER_ARGS} --pin_memory"
 fi
+if [[ "${PERSISTENT_WORKERS}" == "true" && "${NUM_WORKERS}" != "0" ]]; then
+    DATALOADER_ARGS="${DATALOADER_ARGS} --persistent_workers"
+fi
+if [[ -n "${PREFETCH_FACTOR}" && "${NUM_WORKERS}" != "0" ]]; then
+    DATALOADER_ARGS="${DATALOADER_ARGS} --prefetch_factor ${PREFETCH_FACTOR}"
+fi
+
+TRAIN_ARGS="--model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} ${DATALOADER_ARGS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
+if [[ -n "${START_CHECKPOINT}" ]]; then
+    TRAIN_ARGS="${TRAIN_ARGS} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
+fi
+
+TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee ${RESULTS_PATH}/train.log"
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
 
 export RUN_ID
