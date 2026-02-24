@@ -310,7 +310,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
 def compute_epoch_metrics(model: torch.nn.Module, args: argparse.Namespace, config: ConfigDict,
                           device: torch.device, device_ids: List[int], best_metric: float,
                           epoch: int, scheduler: torch.optim.lr_scheduler, optimizer,
-                          all_time_all_metrics, all_losses,  world_size=None, metrics_avg=None, all_metrics=None) -> float:
+                          all_time_all_metrics, all_losses,  world_size=None, metrics_avg=None, all_metrics=None):
 
     """
     Compute and log the metrics for the current epoch, and save model weights if the metric improves.
@@ -331,7 +331,9 @@ def compute_epoch_metrics(model: torch.nn.Module, args: argparse.Namespace, conf
         optimizer:
         all_time_all_metrics:
     Returns:
-        The updated best_metric.
+        Tuple[float, float]:
+            - Updated best metric.
+            - Current epoch metric used for scheduler / gating.
     """
 
     ddp = True if world_size else False
@@ -405,7 +407,7 @@ def compute_epoch_metrics(model: torch.nn.Module, args: argparse.Namespace, conf
         for metric_name in metrics_avg:
             wandb.log({f'metric_{metric_name}': metrics_avg[metric_name]})
 
-    return best_metric
+    return best_metric, metric_avg
 
 
 def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=None) -> None:
@@ -552,6 +554,9 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
     early_stopping_patience = int(getattr(config.training, 'early_stopping_patience', 0))
     enable_early_stopping = (not ddp) and early_stopping_patience > 0
     no_improve_epochs = 0
+    min_epoch0_metric = getattr(config.training, 'min_epoch0_metric', None)
+    if min_epoch0_metric is not None:
+        min_epoch0_metric = float(min_epoch0_metric)
 
     multi_loss = choice_loss(args, config)
     scaler = GradScaler(enabled=(use_amp and amp_dtype == torch.float16))
@@ -608,7 +613,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
             metrics_avg, all_metrics = valid_multi_gpu(model_to_valid, args, config, args.device_ids, verbose=False)
             if rank == 0:
                 all_time_all_metrics[f"epoch_{epoch}"] = all_metrics
-                best_metric = compute_epoch_metrics(
+                best_metric, _ = compute_epoch_metrics(
                     model=model_to_valid,
                     args=args,
                     config=config,
@@ -626,7 +631,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
                 )
         else:
             prev_best_metric = best_metric
-            best_metric = compute_epoch_metrics(
+            best_metric, metric_avg = compute_epoch_metrics(
                 model=model_to_valid,
                 args=args,
                 config=config,
@@ -639,6 +644,14 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
                 all_time_all_metrics=all_time_all_metrics,
                 all_losses=all_losses,
             )
+
+            if min_epoch0_metric is not None and epoch == 0 and metric_avg < min_epoch0_metric:
+                if should_print:
+                    print(
+                        f"Early gate stop at epoch 0: {args.metric_for_scheduler}={metric_avg:.4f} "
+                        f"is below required {min_epoch0_metric:.4f}."
+                    )
+                break
 
             if enable_early_stopping:
                 if best_metric > prev_best_metric:

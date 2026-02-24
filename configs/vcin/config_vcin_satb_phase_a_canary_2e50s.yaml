@@ -16,18 +16,26 @@ training:
   target_instrument: null
   num_epochs: 2
   num_steps: 50
-  optimizer: prodigy
-  lr: 0.03
+  optimizer: adamw
+  lr: 3.0e-4
   patience: 2
   reduce_factor: 0.95
   q: 0.95
   coarse_loss_clip: true
   max_nonfinite_batches_per_epoch: 0
+  min_epoch0_metric: 0.80
   ema_momentum: 0.999
   read_metadata_procs: 8
   other_fix: false
   use_amp: true
   amp_dtype: bfloat16
+
+optimizer:
+  weight_decay: 1.0e-2
+  betas: !!python/tuple
+  - 0.9
+  - 0.95
+  eps: 1.0e-8
 
 model:
   dim: 128
@@ -96,7 +104,7 @@ augmentations:
   loudness: true
   loudness_min: 0.5
   loudness_max: 1.5
-  mixup: true
+  mixup: false
   mixup_probs:
     !!python/tuple
     - 0.2

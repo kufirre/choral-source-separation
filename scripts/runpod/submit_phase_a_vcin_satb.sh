@@ -41,6 +41,16 @@ BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-bash scripts/runpod/bootstrap_train_env.sh}"
 RUNPOD_REPO_URL="${RUNPOD_REPO_URL:-https://github.com/kufirre/choral-source-separation.git}"
 RUNPOD_GIT_REF="${RUNPOD_GIT_REF:-vcin-dev}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace/choral-source-separation}"
+RUN_PHASE="${RUN_PHASE:-A}"
+RUN_TIER="${RUN_TIER:-T3}"
+QUALITY_GATE_MODE="${QUALITY_GATE_MODE:-warn}"
+QUALITY_GATE_MIN_BEST_SDR="${QUALITY_GATE_MIN_BEST_SDR:-0.8}"
+QUALITY_GATE_MAX_DROP_FROM_BEST="${QUALITY_GATE_MAX_DROP_FROM_BEST:-1.0}"
+QUALITY_GATE_MIN_EVALS="${QUALITY_GATE_MIN_EVALS:-2}"
+RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-20}"
+RUNPOD_RETRY_ON_STARTUP_TIMEOUT="${RUNPOD_RETRY_ON_STARTUP_TIMEOUT:-true}"
+RUNPOD_FALLBACK_GPU_TYPE="${RUNPOD_FALLBACK_GPU_TYPE:-NVIDIA A100 80GB PCIe}"
+RUNPOD_FALLBACK_CLOUD_TYPE="${RUNPOD_FALLBACK_CLOUD_TYPE:-SECURE}"
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
     export BOOTSTRAP_CKPT_URI="${BOOTSTRAP_CKPT_URI:-${START_CHECKPOINT}}"
@@ -91,7 +101,9 @@ if [[ -n "${START_CHECKPOINT}" ]]; then
     TRAIN_ARGS="${TRAIN_ARGS} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
 fi
 
-TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee ${RESULTS_PATH}/train.log"
+POST_TRAIN_CHECK_CMD="bash scripts/runpod/post_train_checks.sh --train-log ${RESULTS_PATH}/train.log --results-path ${RESULTS_PATH} --mode ${QUALITY_GATE_MODE} --min-best-sdr ${QUALITY_GATE_MIN_BEST_SDR} --max-drop-from-best ${QUALITY_GATE_MAX_DROP_FROM_BEST} --min-evals ${QUALITY_GATE_MIN_EVALS}"
+
+TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee -a ${RESULTS_PATH}/train.log; ${POST_TRAIN_CHECK_CMD}"
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
 
 export RUN_ID
@@ -99,10 +111,44 @@ export RUNPOD_POD_NAME
 export TRAIN_CMD
 export DATASET_GCS_PATHS
 export USE_CHECKPOINT
+export CONFIG_PATH
+export TRAIN_DATA_PATHS
+export VALID_DATA_PATHS
+export RESULTS_PATH
+export START_CHECKPOINT
+export RUNPOD_REPO_URL
+export RUNPOD_GIT_REF
+export RUN_PHASE
+export RUN_TIER
+export QUALITY_GATE_MODE
+export QUALITY_GATE_MIN_BEST_SDR
+export QUALITY_GATE_MAX_DROP_FROM_BEST
+export QUALITY_GATE_MIN_EVALS
+export RUNPOD_VOLUME_GB
 
 echo "[runpod] Submitting pod RUN_ID=${RUN_ID}"
 echo "[runpod] MODEL_TYPE=${MODEL_TYPE}"
 echo "[runpod] CONFIG_PATH=${CONFIG_PATH}"
+echo "[runpod] RUN_PHASE=${RUN_PHASE}"
+echo "[runpod] RUN_TIER=${RUN_TIER}"
+echo "[runpod] QUALITY_GATE_MODE=${QUALITY_GATE_MODE}"
+echo "[runpod] RUNPOD_VOLUME_GB=${RUNPOD_VOLUME_GB}"
 echo "[runpod] TRAIN_CMD=${TRAIN_CMD}"
 
-"${SCRIPT_DIR}/submit_runpod_pod.sh"
+submit_with_optional_retry() {
+    if "${SCRIPT_DIR}/submit_runpod_pod.sh"; then
+        return 0
+    fi
+
+    if [[ "${RUNPOD_RETRY_ON_STARTUP_TIMEOUT}" != "true" ]]; then
+        return 1
+    fi
+
+    echo "[runpod] Initial submit/startup failed. Retrying once with fallback runtime profile..."
+    echo "[runpod] Fallback cloud=${RUNPOD_FALLBACK_CLOUD_TYPE}, gpu=${RUNPOD_FALLBACK_GPU_TYPE}"
+    export RUNPOD_CLOUD_TYPE="${RUNPOD_FALLBACK_CLOUD_TYPE}"
+    export RUNPOD_GPU_TYPE="${RUNPOD_FALLBACK_GPU_TYPE}"
+    "${SCRIPT_DIR}/submit_runpod_pod.sh"
+}
+
+submit_with_optional_retry

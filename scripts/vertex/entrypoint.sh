@@ -18,6 +18,7 @@ RUNPOD_AUTO_TERMINATE_ON_EXIT="${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}"
 RUNPOD_API_BASE="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 RUNPOD_API_KEY="${RUNPOD_API_KEY:-}"
 RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-}"
+COMPLETION_MARKER_PATH="${COMPLETION_MARKER_PATH:-${LOCAL_ARTIFACT_DIR}/meta/run_completed.ok}"
 export GCP_SA_KEY_FILE
 GCLOUD_AUTH_ACTIVE="false"
 
@@ -245,9 +246,28 @@ if [[ -x "scripts/vertex/capture_run_metadata.sh" ]]; then
     scripts/vertex/capture_run_metadata.sh "${LOCAL_ARTIFACT_DIR}/meta" || true
 fi
 
+if [[ -f "${COMPLETION_MARKER_PATH}" ]]; then
+    echo "[entrypoint] Completion marker found at ${COMPLETION_MARKER_PATH}; skipping TRAIN_CMD rerun for RUN_ID=${RUN_ID}."
+    sync_artifacts_to_gcs
+    terminate_runpod_pod || true
+    exit 0
+fi
+
 if [[ -n "${TRAIN_CMD}" ]]; then
     echo "[entrypoint] Running TRAIN_CMD: ${TRAIN_CMD}"
+    set +e
     bash -lc "${TRAIN_CMD}"
+    train_status=$?
+    set -e
+    if [[ "${train_status}" -eq 0 ]]; then
+        mkdir -p "$(dirname "${COMPLETION_MARKER_PATH}")"
+        date -u +%Y-%m-%dT%H:%M:%SZ > "${COMPLETION_MARKER_PATH}"
+        echo "[entrypoint] Marked run completion at ${COMPLETION_MARKER_PATH}"
+        sync_artifacts_to_gcs
+    else
+        echo "[entrypoint] TRAIN_CMD exited with status ${train_status}"
+    fi
+    exit "${train_status}"
 else
     echo "[entrypoint] TRAIN_CMD is required."
     exit 1
