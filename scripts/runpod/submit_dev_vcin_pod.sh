@@ -7,6 +7,10 @@ if [[ -f "${SCRIPT_DIR}/env.sh" ]]; then
     source "${SCRIPT_DIR}/env.sh"
 fi
 
+# Dev loop defaults prioritize availability and fast iteration over peak single-run throughput.
+RUNPOD_CLOUD_TYPE="${DEV_RUNPOD_CLOUD_TYPE:-SECURE}"
+RUNPOD_GPU_TYPE="${DEV_RUNPOD_GPU_TYPE:-NVIDIA A100 80GB PCIe}"
+
 new_run_id() {
     printf 'dev-vcin-%s-%04d' "$(date +%Y%m%d-%H%M%S)" "$((RANDOM % 10000))"
 }
@@ -38,6 +42,8 @@ export ARTIFACT_SYNC_SECONDS
 export DATASET_GCS_PATHS
 export RUNPOD_CONTAINER_DISK_GB
 export RUNPOD_VOLUME_GB
+export RUNPOD_CLOUD_TYPE
+export RUNPOD_GPU_TYPE
 export TRAIN_CMD
 
 echo "[runpod-dev] Submitting long-lived dev pod RUN_ID=${RUN_ID}"
