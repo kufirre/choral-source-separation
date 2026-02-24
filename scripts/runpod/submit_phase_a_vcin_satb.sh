@@ -33,6 +33,7 @@ USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 START_CHECKPOINT="${START_CHECKPOINT:-}"
 CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_only_compatible_weights}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-bash scripts/runpod/bootstrap_train_env.sh}"
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
     export BOOTSTRAP_CKPT_URI="${BOOTSTRAP_CKPT_URI:-${START_CHECKPOINT}}"
@@ -48,7 +49,7 @@ if [[ ! -f "${CONFIG_PATH_CHECK}" ]]; then
     exit 1
 fi
 
-TRAIN_CMD_DEFAULT="python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
+TRAIN_CMD_DEFAULT="${BOOTSTRAP_CMD} && python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
 if [[ -n "${START_CHECKPOINT}" ]]; then
     TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
 fi
