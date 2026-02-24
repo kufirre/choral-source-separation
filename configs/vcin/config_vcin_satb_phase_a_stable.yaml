@@ -1,0 +1,114 @@
+audio:
+  chunk_size: 132300  # samplerate * segment
+  hop_length: 1024
+  min_mean_abs: 0.0
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  grad_clip: 0.5
+  segment: 11
+  shift: 1
+  samplerate: 44100
+  channels: 2
+  normalize: true
+  instruments: ['S', 'A', 'T', 'B']
+  target_instrument: null
+  num_epochs: 40
+  num_steps: 300
+  optimizer: prodigy
+  lr: 0.01
+  patience: 2
+  reduce_factor: 0.5
+  early_stopping_patience: 8
+  q: 0.95
+  coarse_loss_clip: true
+  max_nonfinite_batches_per_epoch: 0
+  ema_momentum: 0.999
+  read_metadata_procs: 8
+  other_fix: false
+  use_amp: true
+  amp_dtype: bfloat16
+
+model:
+  dim: 128
+  depth: 12
+  stereo: true
+  num_stems: 4
+  num_latent_sources: 10
+  num_iterations: 1
+  backbone_type: ts_bsmamba2
+  ts_sr: 44100
+  ts_win: 2048
+  ts_stride: 512
+  ts_feature_dim: 128
+  ts_num_repeat_mask: 8
+  ts_num_repeat_map: 4
+  stage1_loss_weight: 1.0
+  stage2_loss_weight: 1.0
+  min_energy_epsilon: 1.0e-4
+  min_energy_loss_weight: 0.0
+  duplicate_cos_threshold: 0.95
+  duplicate_loss_weight: 0.0
+  repulsion_loss_weight: 0.0
+  cgp_loss_weight: 0.0
+  magnitude_penalty_loss_weight: 0.0
+  magnitude_penalty_epsilon: 1.0e-4
+  cgp_warmup_steps: 0
+  repulsion_warmup_steps: 0
+  magnitude_penalty_warmup_steps: 0
+  use_homoscedastic_weighting: false
+  homoscedastic_init: 0.0
+  time_module_depth: 1
+  freq_module_depth: 1
+  mask_estimator_depth: 2
+  module_type: mamba2
+  dim_head: 64
+  heads: 8
+  ff_dropout: 0.1
+  attn_dropout: 0.1
+  flash_attn: true
+  mamba_gmlp: false
+  stft_n_fft: 2048
+  stft_hop_length: 512
+  stft_win_length: 2048
+  stft_normalized: false
+  multi_stft_resolution_loss_weight: 1.0
+  multi_stft_resolutions_window_sizes: !!python/tuple
+  - 4096
+  - 2048
+  - 1024
+  - 512
+  - 256
+  multi_stft_hop_size: 147
+  multi_stft_normalized: false
+  # Phase A stability profile: keep only assignment pathway active.
+  enable_repulsion: false
+  enable_pitch: false
+  enable_assignment: true
+  enable_gate: false
+  enable_intent: false
+  enable_cgp: false
+  enable_film: false
+  embed_dim: 64
+
+augmentations:
+  enable: true
+  loudness: true
+  loudness_min: 0.5
+  loudness_max: 1.5
+  mixup: true
+  mixup_probs:
+    !!python/tuple
+    - 0.2
+    - 0.02
+  mixup_loudness_min: 0.5
+  mixup_loudness_max: 1.5
+  all:
+    channel_shuffle: 0.5
+    random_inverse: 0.1
+    random_polarity: 0.5
+
+inference:
+  num_overlap: 2
+  batch_size: 4
