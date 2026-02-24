@@ -11,7 +11,8 @@ export RUNPOD_API_BASE="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 export RUNPOD_API_KEY="${RUNPOD_API_KEY:-}"
 export RUNPOD_DRY_RUN="${RUNPOD_DRY_RUN:-false}"
 
-export RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-COMMUNITY}"
+# Default to secure capacity for reliable iterative experimentation.
+export RUNPOD_CLOUD_TYPE="${RUNPOD_CLOUD_TYPE:-SECURE}"
 export RUNPOD_INTERRUPTIBLE="${RUNPOD_INTERRUPTIBLE:-false}"
 export RUNPOD_GPU_TYPE="${RUNPOD_GPU_TYPE:-NVIDIA H100 80GB HBM3}"
 export RUNPOD_GPU_COUNT="${RUNPOD_GPU_COUNT:-1}"

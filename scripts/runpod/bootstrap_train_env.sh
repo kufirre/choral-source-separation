@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REQUIRE_GCLOUD_AUTH="${REQUIRE_GCLOUD_AUTH:-true}"
+
 trim() {
     local value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
@@ -39,6 +41,10 @@ sync_dataset_path() {
     target_dir="${DATA_ROOT:-/gcs_data}/${local_path}"
 
     echo "[runpod-bootstrap] Downloading ${source_uri} -> ${target_dir}"
+    if ! gcloud storage ls "${source_uri}" >/dev/null 2>&1; then
+        echo "[runpod-bootstrap] Dataset path not found (${source_uri}); skipping."
+        return 0
+    fi
     mkdir -p "${target_dir}"
     gcloud storage rsync -r "${source_uri}" "${target_dir}"
 }
@@ -49,8 +55,8 @@ activate_gcp_service_account() {
     key_file="${GCP_SA_KEY_FILE:-/tmp/gcp-service-account.json}"
 
     if ! command -v gcloud >/dev/null 2>&1; then
-        echo "[runpod-bootstrap] gcloud not found; skipping auth setup."
-        return 0
+        echo "[runpod-bootstrap] gcloud not found; cannot perform dataset/checkpoint sync." >&2
+        return 1
     fi
 
     if [[ -n "${GCP_SA_KEY_B64:-}" ]]; then
@@ -93,11 +99,22 @@ download_bootstrap_checkpoint() {
 
     mkdir -p "$(dirname "${checkpoint_path}")"
     echo "[runpod-bootstrap] Downloading checkpoint ${BOOTSTRAP_CKPT_URI} -> ${checkpoint_path}"
+    if ! gcloud storage ls "${BOOTSTRAP_CKPT_URI}" >/dev/null 2>&1; then
+        echo "[runpod-bootstrap] Checkpoint not found (${BOOTSTRAP_CKPT_URI}); skipping."
+        return 0
+    fi
     gcloud storage cp "${BOOTSTRAP_CKPT_URI}" "${checkpoint_path}"
 }
 
 main() {
-    activate_gcp_service_account
+    if ! activate_gcp_service_account; then
+        if [[ "${REQUIRE_GCLOUD_AUTH}" == "true" ]]; then
+            echo "[runpod-bootstrap] GCP auth is required but unavailable." >&2
+            exit 1
+        fi
+        echo "[runpod-bootstrap] Continuing without gcloud sync because REQUIRE_GCLOUD_AUTH=false."
+        return 0
+    fi
 
     if [[ -n "${GCS_DATA_BUCKET:-}" && -n "${DATASET_GCS_PATHS:-}" ]]; then
         IFS=',' read -r -a dataset_paths <<< "${DATASET_GCS_PATHS}"

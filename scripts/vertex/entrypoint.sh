@@ -19,6 +19,7 @@ RUNPOD_API_BASE="${RUNPOD_API_BASE:-https://rest.runpod.io/v1}"
 RUNPOD_API_KEY="${RUNPOD_API_KEY:-}"
 RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-}"
 export GCP_SA_KEY_FILE
+GCLOUD_AUTH_ACTIVE="false"
 
 trim() {
     local value="$1"
@@ -66,6 +67,9 @@ sync_dataset_path() {
 }
 
 sync_artifacts_to_gcs() {
+    if [[ "${GCLOUD_AUTH_ACTIVE}" != "true" ]]; then
+        return
+    fi
     if [[ -z "${GCS_ARTIFACT_BUCKET:-}" ]]; then
         return
     fi
@@ -147,7 +151,10 @@ cleanup_on_exit() {
 trap cleanup_on_exit EXIT
 
 activate_gcp_service_account() {
+    local active_account
+
     if ! command -v gcloud >/dev/null 2>&1; then
+        echo "[entrypoint] gcloud not found; skipping GCS sync."
         return
     fi
 
@@ -168,6 +175,14 @@ PY
         export GOOGLE_APPLICATION_CREDENTIALS="${GCP_SA_KEY_FILE}"
         echo "[entrypoint] Activated GCP service account credentials."
     fi
+
+    active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n 1)"
+    if [[ -n "${active_account}" ]]; then
+        GCLOUD_AUTH_ACTIVE="true"
+        echo "[entrypoint] Active gcloud account: ${active_account}"
+    else
+        echo "[entrypoint] No active gcloud account; skipping GCS sync operations."
+    fi
 }
 
 mkdir -p "${LOCAL_ARTIFACT_DIR}"
@@ -178,24 +193,28 @@ mkdir -p data
 activate_gcp_service_account
 
 if [[ -n "${GCS_DATA_BUCKET:-}" ]]; then
-    if [[ -n "${DATASET_GCS_PATHS}" ]]; then
-        echo "[entrypoint] Downloading scoped datasets: ${DATASET_GCS_PATHS}"
-        IFS=',' read -r -a dataset_paths <<< "${DATASET_GCS_PATHS}"
-        for dataset_path in "${dataset_paths[@]}"; do
-            sync_dataset_path "${dataset_path}"
-        done
+    if [[ "${GCLOUD_AUTH_ACTIVE}" != "true" ]]; then
+        echo "[entrypoint] GCS_DATA_BUCKET set but no gcloud auth; skipping dataset download."
     else
-        DATASET_URI="gs://${GCS_DATA_BUCKET}/${DATASET_GCS_PREFIX}"
-        echo "[entrypoint] DATASET_GCS_PATHS is empty; downloading full prefix ${DATASET_URI}"
-        if gcloud storage ls "${DATASET_URI}" >/dev/null 2>&1; then
-            gcloud storage rsync -r "${DATASET_URI}" "${DATA_ROOT}"
+        if [[ -n "${DATASET_GCS_PATHS}" ]]; then
+            echo "[entrypoint] Downloading scoped datasets: ${DATASET_GCS_PATHS}"
+            IFS=',' read -r -a dataset_paths <<< "${DATASET_GCS_PATHS}"
+            for dataset_path in "${dataset_paths[@]}"; do
+                sync_dataset_path "${dataset_path}"
+            done
         else
-            echo "[entrypoint] Dataset path not found (${DATASET_URI}); skipping download."
+            DATASET_URI="gs://${GCS_DATA_BUCKET}/${DATASET_GCS_PREFIX}"
+            echo "[entrypoint] DATASET_GCS_PATHS is empty; downloading full prefix ${DATASET_URI}"
+            if gcloud storage ls "${DATASET_URI}" >/dev/null 2>&1; then
+                gcloud storage rsync -r "${DATASET_URI}" "${DATA_ROOT}"
+            else
+                echo "[entrypoint] Dataset path not found (${DATASET_URI}); skipping download."
+            fi
         fi
     fi
 fi
 
-if [[ "${USE_CHECKPOINT}" == "true" && -n "${BOOTSTRAP_CKPT_URI}" ]]; then
+if [[ "${GCLOUD_AUTH_ACTIVE}" == "true" && "${USE_CHECKPOINT}" == "true" && -n "${BOOTSTRAP_CKPT_URI}" ]]; then
     mkdir -p "$(dirname "${BOOTSTRAP_CKPT_LOCAL_PATH}")"
     echo "[entrypoint] Downloading bootstrap checkpoint from ${BOOTSTRAP_CKPT_URI}"
     if gcloud storage cp "${BOOTSTRAP_CKPT_URI}" "${BOOTSTRAP_CKPT_LOCAL_PATH}" >/dev/null 2>&1; then
@@ -206,16 +225,20 @@ if [[ "${USE_CHECKPOINT}" == "true" && -n "${BOOTSTRAP_CKPT_URI}" ]]; then
     fi
 fi
 
-if [[ -n "${GCS_ARTIFACT_BUCKET:-}" ]]; then
+if [[ "${GCLOUD_AUTH_ACTIVE}" == "true" && -n "${GCS_ARTIFACT_BUCKET:-}" ]]; then
     echo "[entrypoint] Restoring artifacts from gs://${GCS_ARTIFACT_BUCKET}/artifacts/${RUN_ID}"
     gcloud storage rsync -r \
         "gs://${GCS_ARTIFACT_BUCKET}/artifacts/${RUN_ID}" \
         "${LOCAL_ARTIFACT_DIR}" || true
 fi
 
-background_sync_loop &
-SYNC_PID=$!
-echo "[entrypoint] Background sync started (PID ${SYNC_PID})"
+if [[ "${GCLOUD_AUTH_ACTIVE}" == "true" && -n "${GCS_ARTIFACT_BUCKET:-}" ]]; then
+    background_sync_loop &
+    SYNC_PID=$!
+    echo "[entrypoint] Background sync started (PID ${SYNC_PID})"
+else
+    echo "[entrypoint] Background sync disabled (missing gcloud auth or GCS_ARTIFACT_BUCKET)."
+fi
 echo "[entrypoint] RUN_ID=${RUN_ID}"
 
 if [[ -x "scripts/vertex/capture_run_metadata.sh" ]]; then
