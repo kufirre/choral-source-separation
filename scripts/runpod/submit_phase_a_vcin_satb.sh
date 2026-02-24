@@ -52,7 +52,7 @@ if [[ ! -f "${CONFIG_PATH_CHECK}" ]]; then
     exit 1
 fi
 
-TRAIN_CMD_DEFAULT="set -euo pipefail; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD} && python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
+TRAIN_CMD_DEFAULT="set -euo pipefail; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD} && python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS} 2>&1 | tee ${RESULTS_PATH}/train.log"
 if [[ -n "${START_CHECKPOINT}" ]]; then
     TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
 fi
