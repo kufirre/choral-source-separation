@@ -19,8 +19,8 @@ export RUNPOD_POD_NAME_PREFIX="${RUNPOD_POD_NAME_PREFIX:-vcin}"
 # Leave blank by default; submit wrappers generate a fresh unique value per launch.
 export RUNPOD_POD_NAME="${RUNPOD_POD_NAME:-}"
 
-export RUNPOD_CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-100}"
-export RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-100}"
+export RUNPOD_CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-50}"
+export RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-40}"
 # Do not mount over /workspace; the image code lives at /workspace/choral-source-separation.
 export RUNPOD_VOLUME_MOUNT_PATH="${RUNPOD_VOLUME_MOUNT_PATH:-/runpod-volume}"
 export RUNPOD_SUPPORT_PUBLIC_IP="${RUNPOD_SUPPORT_PUBLIC_IP:-true}"
