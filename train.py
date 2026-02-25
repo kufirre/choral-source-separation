@@ -124,7 +124,7 @@ def _format_loss_breakdown(loss_breakdown):
     return " ".join(formatted)
 
 
-def _report_nonfinite_gradients(module: torch.nn.Module, topk: int = 8):
+def _report_nonfinite_gradients(module: torch.nn.Module, topk: int = 8) -> bool:
     offenders = []
     max_abs_grad = 0.0
     max_abs_grad_name = ""
@@ -153,7 +153,7 @@ def _report_nonfinite_gradients(module: torch.nn.Module, topk: int = 8):
             "[grad-debug] grad_norm was non-finite but no element-level non-finite "
             f"entries were found. max_abs_grad={max_abs_grad:.3e} ({max_abs_grad_name})"
         )
-        return
+        return False
 
     offenders.sort(key=lambda item: item[0], reverse=True)
     print(
@@ -166,6 +166,7 @@ def _report_nonfinite_gradients(module: torch.nn.Module, topk: int = 8):
             f"[grad-debug] {name}: nonfinite={nonfinite_count}/{total_count} "
             f"({ratio:.2%}) absmax={grad_abs_max:.3e}"
         )
+    return True
 
 
 def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids, return_loss_breakdown=False):
@@ -432,23 +433,39 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                 sys.stdout.flush()
 
             if not np.isfinite(grad_norm_value):
-                nonfinite_batches += 1
-                if should_print:
-                    print(
-                        f"Non-finite grad norm at epoch {epoch} step {i} "
-                        f"(count {nonfinite_batches})."
-                    )
-                    sys.stdout.flush()
-                    _report_nonfinite_gradients(
+                # Retry norm aggregation in float64 to avoid false positives from reduction precision.
+                grad_norm_f64 = float(
+                    torch.norm(torch.stack([term.detach().double() for term in grad_norm_terms]), p=2)
+                    .cpu()
+                    .item()
+                )
+                if np.isfinite(grad_norm_f64):
+                    grad_norm_value = grad_norm_f64
+                else:
+                    has_nonfinite_entries = _report_nonfinite_gradients(
                         model.module if ddp else model,
                         topk=nonfinite_grad_report_topk,
                     )
-                optimizer.zero_grad(set_to_none=True)
-                if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
-                    raise FloatingPointError(
-                        f"Too many non-finite gradients in epoch {epoch}: {nonfinite_batches}"
-                    )
-                continue
+                    if has_nonfinite_entries:
+                        nonfinite_batches += 1
+                        if should_print:
+                            print(
+                                f"Non-finite grad norm at epoch {epoch} step {i} "
+                                f"(count {nonfinite_batches})."
+                            )
+                            sys.stdout.flush()
+                        optimizer.zero_grad(set_to_none=True)
+                        if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
+                            raise FloatingPointError(
+                                f"Too many non-finite gradients in epoch {epoch}: {nonfinite_batches}"
+                            )
+                        continue
+                    if should_print:
+                        print(
+                            f"[grad-debug] Ignoring non-finite grad_norm at epoch {epoch} step {i} "
+                            "because no element-level non-finite gradients were detected."
+                        )
+                        sys.stdout.flush()
 
             if scaler.is_enabled():
                 scaler.step(optimizer)
