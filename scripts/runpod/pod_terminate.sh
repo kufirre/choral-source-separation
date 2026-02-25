@@ -23,8 +23,26 @@ if [[ -z "${POD_ID}" ]]; then
     exit 1
 fi
 
-curl -sS --fail-with-body \
+terminate_body_file="$(mktemp)"
+http_code="$(curl -sS \
+    -o "${terminate_body_file}" \
+    -w "%{http_code}" \
     -X DELETE "${RUNPOD_API_BASE%/}/pods/${POD_ID}" \
-    -H "Authorization: Bearer ${RUNPOD_API_KEY}" >/dev/null
+    -H "Authorization: Bearer ${RUNPOD_API_KEY}")"
 
-echo "[runpod] Terminated pod ${POD_ID}"
+case "${http_code}" in
+    200|202|204)
+        echo "[runpod] Terminated pod ${POD_ID}"
+        ;;
+    404)
+        echo "[runpod] Pod ${POD_ID} is already terminated (404)."
+        ;;
+    *)
+        echo "[runpod] Failed to terminate pod ${POD_ID} (HTTP ${http_code})." >&2
+        cat "${terminate_body_file}" >&2 || true
+        rm -f "${terminate_body_file}"
+        exit 1
+        ;;
+esac
+
+rm -f "${terminate_body_file}"
