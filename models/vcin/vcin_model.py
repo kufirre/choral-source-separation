@@ -10,12 +10,16 @@ Architecture-focused implementation:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+
+logger = logging.getLogger(__name__)
 
 from models.vcin.separator import CRMSeparator
 from models.vcin.pitch_estimator import PitchEstimator
@@ -415,6 +419,26 @@ class VCINModel(nn.Module):
             return 1.0
         return float(min(1.0, step / float(max(warmup_steps, 1))))
 
+    @staticmethod
+    def _autocast_off(device: torch.device):
+        """Disable AMP autocast so spectral ops run in float32."""
+        if device.type == "cuda":
+            return torch.autocast(device_type="cuda", enabled=False)
+        return contextlib.nullcontext()
+
+    def _check_finite(self, name: str, value: torch.Tensor) -> torch.Tensor:
+        """Log a warning if a loss term is non-finite. Returns the value unchanged."""
+        if not torch.isfinite(value).all():
+            step = int(self._train_step.item())
+            value_for_log = value.detach().float()
+            if value_for_log.numel() > 1:
+                value_for_log = value_for_log.mean()
+            logger.warning(
+                "Non-finite detected in loss term '%s' at train_step=%d, value=%s",
+                name, step, value_for_log.cpu().item(),
+            )
+        return value
+
     def _combine_loss_terms(
         self,
         loss_terms: Dict[str, torch.Tensor],
@@ -467,21 +491,22 @@ class VCINModel(nn.Module):
         l1 = F.l1_loss(pred32, target32)
 
         multi_stft_loss = pred32.new_zeros(())
-        for window_size in self.multi_stft_resolutions_window_sizes:
-            res_stft_kwargs = dict(
-                n_fft=max(int(window_size), self.multi_stft_n_fft),
-                win_length=int(window_size),
-                return_complex=True,
-                window=self.multi_stft_window_fn(int(window_size), device=device, dtype=torch.float32),
-                **self.multi_stft_kwargs,
-            )
+        with self._autocast_off(device):
+            for window_size in self.multi_stft_resolutions_window_sizes:
+                res_stft_kwargs = dict(
+                    n_fft=max(int(window_size), self.multi_stft_n_fft),
+                    win_length=int(window_size),
+                    return_complex=True,
+                    window=self.multi_stft_window_fn(int(window_size), device=device, dtype=torch.float32),
+                    **self.multi_stft_kwargs,
+                )
 
-            recon_y = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
-            target_y = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
-            multi_stft_loss = multi_stft_loss + F.l1_loss(
-                torch.view_as_real(recon_y),
-                torch.view_as_real(target_y),
-            )
+                recon_y = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
+                target_y = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **res_stft_kwargs)
+                multi_stft_loss = multi_stft_loss + F.l1_loss(
+                    torch.view_as_real(recon_y),
+                    torch.view_as_real(target_y),
+                )
 
         if len(self.multi_stft_resolutions_window_sizes) > 0:
             multi_stft_loss = multi_stft_loss / float(len(self.multi_stft_resolutions_window_sizes))
@@ -512,8 +537,9 @@ class VCINModel(nn.Module):
             ),
         )
 
-        pred_spec = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **stft_kwargs)
-        target_spec = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **stft_kwargs)
+        with self._autocast_off(device):
+            pred_spec = torch.stft(rearrange(pred32, 'b n s t -> (b n s) t'), **stft_kwargs)
+            target_spec = torch.stft(rearrange(target32, 'b n s t -> (b n s) t'), **stft_kwargs)
         pred_mag = pred_spec.abs()
         target_mag = target_spec.abs()
 
@@ -656,6 +682,8 @@ class VCINModel(nn.Module):
         train_step = int(self._train_step.item())
 
         stage2_loss, l1_stage2, stft_stage2 = self._compute_reconstruction_losses(voice_sel, target_sel, device)
+        self._check_finite('stage2_l1', l1_stage2)
+        self._check_finite('stage2_stft', stft_stage2)
         loss_terms: Dict[str, torch.Tensor] = {}
         if self.stage2_loss_weight > 0:
             loss_terms['stage2'] = self.stage2_loss_weight * stage2_loss
@@ -668,6 +696,8 @@ class VCINModel(nn.Module):
             if active_ids is not None:
                 stage1_voices = stage1_voices[:, active_ids]
             stage1_loss, l1_stage1, stft_stage1 = self._compute_reconstruction_losses(stage1_voices, target_sel, device)
+            self._check_finite('stage1_l1', l1_stage1)
+            self._check_finite('stage1_stft', stft_stage1)
             loss_terms['stage1'] = self.stage1_loss_weight * stage1_loss
 
         min_energy_loss, duplicate_loss = self._latent_regularizers(latent_sources)
@@ -682,6 +712,7 @@ class VCINModel(nn.Module):
         )
         if self.enable_repulsion and repulsion_scale > 0:
             repulsion_loss = self.repulsion.repulsion_loss(source_embed)
+            self._check_finite('repulsion', repulsion_loss)
             loss_terms['repulsion'] = repulsion_scale * repulsion_loss
 
         cgp_loss = voice_sel.new_zeros(())
@@ -699,11 +730,13 @@ class VCINModel(nn.Module):
         )
         if magnitude_penalty_scale > 0:
             magnitude_penalty_loss = self._compute_magnitude_penalty_loss(voice_sel, target_sel, device)
+            self._check_finite('magnitude_penalty', magnitude_penalty_loss)
             loss_terms['magnitude_penalty'] = magnitude_penalty_scale * magnitude_penalty_loss
 
         if len(loss_terms) == 0:
             raise ValueError("No active loss terms. Check VCIN loss weights/config.")
         total_loss, weighting_info = self._combine_loss_terms(loss_terms)
+        self._check_finite('total_loss', total_loss)
 
         if not return_loss_breakdown:
             return total_loss

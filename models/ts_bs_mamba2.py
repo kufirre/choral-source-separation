@@ -2,6 +2,8 @@
 
 from __future__ import print_function
 
+import contextlib
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -228,17 +230,30 @@ class Separator(nn.Module):
         input = torch.cat([pad_aux, input, pad_aux], 1)
 
         return input, rest
+
+    @staticmethod
+    def _autocast_off_context(device: torch.device):
+        if device.type == "cuda":
+            return torch.autocast(device_type="cuda", enabled=False)
+        return contextlib.nullcontext()
         
     def forward(self, input, return_aux=False):
         # input shape: (B, C, T)
 
         batch_size, nch, nsample = input.shape
+        output_dtype = input.dtype
         input = input.view(batch_size*nch, -1)
        
         # frequency-domain separation
-        spec = torch.stft(input, n_fft=self.win, hop_length=self.stride, 
-                          window=torch.hann_window(self.win).to(input.device).type(input.type()),
-                          return_complex=True)
+        with self._autocast_off_context(input.device):
+            stft_window = torch.hann_window(self.win, device=input.device, dtype=torch.float32)
+            spec = torch.stft(
+                input.float(),
+                n_fft=self.win,
+                hop_length=self.stride,
+                window=stft_window,
+                return_complex=True,
+            )
 
         # concat real and imag, split to subbands
         spec_RI = torch.stack([spec.real, spec.imag], 1)  # B*nch, 2, F, T
@@ -299,15 +314,25 @@ class Separator(nn.Module):
         sep_subband_spec = torch.cat(sep_subband_spec, 2)
         est_spec_mask = torch.cat(sep_subband_spec_mask, 2)
 
-        output = torch.istft(sep_subband_spec.view(batch_size*nch*self.num_output, self.enc_dim, -1), 
-                             n_fft=self.win, hop_length=self.stride, 
-                             window=torch.hann_window(self.win).to(input.device).type(input.type()), length=nsample)
-        output_mask = torch.istft(est_spec_mask.view(batch_size*nch*self.num_output, self.enc_dim, -1),
-                             n_fft=self.win, hop_length=self.stride,
-                             window=torch.hann_window(self.win).to(input.device).type(input.type()), length=nsample)
+        with self._autocast_off_context(input.device):
+            istft_window = torch.hann_window(self.win, device=input.device, dtype=torch.float32)
+            output = torch.istft(
+                sep_subband_spec.view(batch_size * nch * self.num_output, self.enc_dim, -1).to(torch.complex64),
+                n_fft=self.win,
+                hop_length=self.stride,
+                window=istft_window,
+                length=nsample,
+            )
+            output_mask = torch.istft(
+                est_spec_mask.view(batch_size * nch * self.num_output, self.enc_dim, -1).to(torch.complex64),
+                n_fft=self.win,
+                hop_length=self.stride,
+                window=istft_window,
+                length=nsample,
+            )
 
-        output = output.view(batch_size, nch, self.num_output, -1).transpose(1,2).contiguous()
-        output_mask = output_mask.view(batch_size, nch, self.num_output, -1).transpose(1,2).contiguous()
+        output = output.view(batch_size, nch, self.num_output, -1).transpose(1,2).contiguous().to(output_dtype)
+        output_mask = output_mask.view(batch_size, nch, self.num_output, -1).transpose(1,2).contiguous().to(output_dtype)
 
         if not return_aux:
             return output

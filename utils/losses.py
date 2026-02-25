@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 from typing import Any, Optional, Callable, Union
 
 import auraloss
@@ -7,6 +8,13 @@ import torch
 from ml_collections import ConfigDict
 from torch import nn
 from torch_log_wmse import LogWMSE
+
+
+def _autocast_off(device: torch.device):
+    """Disable AMP autocast so spectral ops run in float32."""
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", enabled=False)
+    return contextlib.nullcontext()
 
 
 def multistft_loss(
@@ -107,8 +115,9 @@ def spec_rmse_loss(
     spec_estimate = estimate.view(-1, lenc)
     spec_sources = sources.view(-1, lenc)
 
-    spec_estimate = torch.stft(spec_estimate, **stft_config, return_complex=True)
-    spec_sources = torch.stft(spec_sources, **stft_config, return_complex=True)
+    with _autocast_off(spec_estimate.device):
+        spec_estimate = torch.stft(spec_estimate.float(), **stft_config, return_complex=True)
+        spec_sources = torch.stft(spec_sources.float(), **stft_config, return_complex=True)
 
     spec_estimate = torch.view_as_real(spec_estimate)
     spec_sources = torch.view_as_real(spec_sources)
@@ -156,8 +165,9 @@ def spec_masked_loss(
     spec_estimate = estimate.view(-1, lenc)
     spec_sources = sources.view(-1, lenc)
 
-    spec_estimate = torch.stft(spec_estimate, **stft_config, return_complex=True)
-    spec_sources = torch.stft(spec_sources, **stft_config, return_complex=True)
+    with _autocast_off(spec_estimate.device):
+        spec_estimate = torch.stft(spec_estimate.float(), **stft_config, return_complex=True)
+        spec_sources = torch.stft(spec_sources.float(), **stft_config, return_complex=True)
 
     spec_estimate = torch.view_as_real(spec_estimate)
     spec_sources = torch.view_as_real(spec_sources)

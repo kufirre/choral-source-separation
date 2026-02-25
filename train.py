@@ -96,7 +96,100 @@ def _has_uninitialized_params(module: torch.nn.Module) -> bool:
     return any(isinstance(param, UninitializedParameter) for param in module.parameters())
 
 
-def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids):
+def _to_scalar_float(value):
+    if torch.is_tensor(value):
+        if value.numel() == 0:
+            return float("nan")
+        value = value.detach()
+        if value.numel() > 1:
+            value = value.mean()
+        return float(value.float().cpu().item())
+    return float(value)
+
+
+def _format_loss_breakdown(loss_breakdown):
+    if not loss_breakdown:
+        return ""
+
+    formatted = []
+    for key in sorted(loss_breakdown.keys()):
+        try:
+            scalar = _to_scalar_float(loss_breakdown[key])
+        except Exception:
+            continue
+        if np.isfinite(scalar):
+            formatted.append(f"{key}={scalar:.5g}")
+        else:
+            formatted.append(f"{key}=nonfinite")
+    return " ".join(formatted)
+
+
+def _report_nonfinite_gradients(module: torch.nn.Module, topk: int = 8):
+    offenders = []
+    max_abs_grad = 0.0
+    max_abs_grad_name = ""
+
+    for name, param in module.named_parameters():
+        grad = param.grad
+        if grad is None:
+            continue
+
+        grad32 = grad.detach().float()
+        grad_abs_max = float(torch.nan_to_num(grad32, nan=0.0, posinf=0.0, neginf=0.0).abs().max().item())
+        if grad_abs_max > max_abs_grad:
+            max_abs_grad = grad_abs_max
+            max_abs_grad_name = name
+
+        finite_mask = torch.isfinite(grad)
+        if finite_mask.all():
+            continue
+
+        nonfinite_count = int((~finite_mask).sum().item())
+        total_count = int(grad.numel())
+        offenders.append((nonfinite_count, total_count, grad_abs_max, name))
+
+    if not offenders:
+        print(
+            "[grad-debug] grad_norm was non-finite but no element-level non-finite "
+            f"entries were found. max_abs_grad={max_abs_grad:.3e} ({max_abs_grad_name})"
+        )
+        return
+
+    offenders.sort(key=lambda item: item[0], reverse=True)
+    print(
+        f"[grad-debug] Found non-finite gradients in {len(offenders)} parameter tensor(s). "
+        f"max_abs_grad={max_abs_grad:.3e} ({max_abs_grad_name})"
+    )
+    for nonfinite_count, total_count, grad_abs_max, name in offenders[: max(int(topk), 1)]:
+        ratio = nonfinite_count / max(total_count, 1)
+        print(
+            f"[grad-debug] {name}: nonfinite={nonfinite_count}/{total_count} "
+            f"({ratio:.2%}) absmax={grad_abs_max:.3e}"
+        )
+
+
+def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids, return_loss_breakdown=False):
+    def _call_model(x_in, y_in, active_ids_in):
+        if return_loss_breakdown:
+            try:
+                model_out = model(
+                    x_in,
+                    y_in,
+                    active_stem_ids=active_ids_in,
+                    return_loss_breakdown=True,
+                )
+            except TypeError as exc:
+                if 'return_loss_breakdown' not in str(exc):
+                    raise
+                model_out = model(x_in, y_in, active_stem_ids=active_ids_in)
+                return model_out, {}
+
+            if isinstance(model_out, tuple) and len(model_out) == 2:
+                return model_out[0], model_out[1]
+            return model_out, {}
+
+        return model(x_in, y_in, active_stem_ids=active_ids_in), {}
+
     if get_internal_loss:
         active_stem_ids = _normalize_active_stem_ids(active_stem_ids, x.shape[0])
 
@@ -108,23 +201,47 @@ def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, de
             and all(isinstance(el, list) for el in active_stem_ids)
         ):
             losses = []
+            breakdown_terms = {}
             for sample_idx, sample_active_ids in enumerate(active_stem_ids):
-                sample_loss = model(
+                sample_loss, sample_breakdown = _call_model(
                     x[sample_idx: sample_idx + 1],
                     y[sample_idx: sample_idx + 1],
-                    active_stem_ids=sample_active_ids,
+                    sample_active_ids,
                 )
                 losses.append(sample_loss)
+                if return_loss_breakdown:
+                    for key, value in sample_breakdown.items():
+                        breakdown_terms.setdefault(key, []).append(value)
             loss = torch.stack(losses).mean()
+            if return_loss_breakdown:
+                aggregated = {
+                    key: torch.stack(values).mean()
+                    for key, values in breakdown_terms.items()
+                    if len(values) > 0
+                }
+                return loss, aggregated
             return loss
 
-        loss = model(x, y, active_stem_ids=active_stem_ids)
+        loss, breakdown = _call_model(x, y, active_stem_ids)
         if isinstance(device_ids, (list, tuple)):
             loss = loss.mean()
+            if return_loss_breakdown and breakdown:
+                normalized_breakdown = {}
+                for key, value in breakdown.items():
+                    if torch.is_tensor(value) and value.numel() > 0:
+                        normalized_breakdown[key] = value.mean()
+                    else:
+                        normalized_breakdown[key] = value
+                breakdown = normalized_breakdown
+        if return_loss_breakdown:
+            return loss, breakdown
         return loss
     else:
         y_ = model(x)
-        return multi_loss(y_, y, x)
+        loss = multi_loss(y_, y, x)
+        if return_loss_breakdown:
+            return loss, {}
+        return loss
 
 
 
@@ -182,6 +299,9 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
         'mel_band_conformer',
         'bs_conformer'
     ) and not args.use_standard_loss)
+    vcin_loss_breakdown_every = int(getattr(config.training, 'vcin_log_loss_breakdown_every', 0))
+    grad_norm_log_every = int(getattr(config.training, 'grad_norm_log_every', 0))
+    nonfinite_grad_report_topk = int(getattr(config.training, 'nonfinite_grad_report_topk', 8))
 
     if ddp:
         pbar = tqdm(train_loader,
@@ -202,16 +322,35 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
 
         if normalize:
             x, y = normalize_batch(x, y)
+
+        loss_breakdown = {}
+        request_loss_breakdown = (
+            args.model_type == 'vcin'
+            and vcin_loss_breakdown_every > 0
+            and (i % vcin_loss_breakdown_every == 0)
+        )
         if safe_mode:
             try:
                 with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
-                    loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
+                    if request_loss_breakdown:
+                        loss, loss_breakdown = forward_step(
+                            x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids,
+                            return_loss_breakdown=True,
+                        )
+                    else:
+                        loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
             except Exception as e:
                 print(f'Error: {e}')
                 continue
         else:
             with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
-                loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
+                if request_loss_breakdown:
+                    loss, loss_breakdown = forward_step(
+                        x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids,
+                        return_loss_breakdown=True,
+                    )
+                else:
+                    loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
 
         # Fail fast on NaN / Inf instead of silently poisoning the whole epoch.
         if not torch.isfinite(loss):
@@ -222,6 +361,29 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                     f"(count {nonfinite_batches})."
                 )
                 sys.stdout.flush()
+                # Always log breakdown on non-finite loss for VCIN models.
+                # Use eval mode to avoid mutating _train_step during debug re-forward.
+                if not request_loss_breakdown and get_internal_loss and args.model_type == 'vcin':
+                    was_training = model.training
+                    try:
+                        model.eval()
+                        with torch.no_grad(), torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
+                            _, loss_breakdown = forward_step(
+                                x, y, active_stem_ids, get_internal_loss, model,
+                                multi_loss, device_ids, return_loss_breakdown=True,
+                            )
+                    except Exception as exc:
+                        print(f"[vcin-loss] debug re-forward failed: {exc}")
+                        sys.stdout.flush()
+                    finally:
+                        if was_training:
+                            model.train()
+                        else:
+                            model.eval()
+                breakdown_text = _format_loss_breakdown(loss_breakdown)
+                if breakdown_text:
+                    print(f"[vcin-loss] epoch={epoch} step={i} {breakdown_text}")
+                    sys.stdout.flush()
             optimizer.zero_grad(set_to_none=True)
             if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
                 raise FloatingPointError(
@@ -246,6 +408,11 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
 
             if grad_norm is not None:
                 grad_norm_value = float(grad_norm.detach().cpu().item() if torch.is_tensor(grad_norm) else grad_norm)
+
+                if should_print and grad_norm_log_every > 0 and (i % grad_norm_log_every == 0):
+                    print(f"[grad] epoch={epoch} step={i} grad_norm={grad_norm_value:.6e}")
+                    sys.stdout.flush()
+
                 if not np.isfinite(grad_norm_value):
                     nonfinite_batches += 1
                     if should_print:
@@ -254,6 +421,10 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                             f"(count {nonfinite_batches})."
                         )
                         sys.stdout.flush()
+                        _report_nonfinite_gradients(
+                            model.module if ddp else model,
+                            topk=nonfinite_grad_report_topk,
+                        )
                     optimizer.zero_grad(set_to_none=True)
                     if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
                         raise FloatingPointError(
@@ -301,6 +472,12 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
             pbar.set_postfix({'loss': 100 * li, 'avg_loss': 100 * loss_val / (i + 1)})
             wandb.log({'loss': 100 * li, 'avg_loss': 100 * loss_val / (i + 1), 'i': i})
             loss.detach()
+
+        if should_print and request_loss_breakdown:
+            breakdown_text = _format_loss_breakdown(loss_breakdown)
+            if breakdown_text:
+                print(f"[vcin-loss] epoch={epoch} step={i} {breakdown_text}")
+                sys.stdout.flush()
 
     if should_print:
         print(f'Training loss: {loss_val / total}')

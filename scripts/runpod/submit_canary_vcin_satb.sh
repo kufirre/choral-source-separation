@@ -16,7 +16,7 @@ else
 fi
 export RUN_ID
 export RUNPOD_POD_NAME
-export CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a_canary_2e50s.yaml}"
+export CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a_diag_core_2e50s.yaml}"
 export USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 export RUN_PHASE="${RUN_PHASE:-canary}"
 export RUN_TIER="${RUN_TIER:-T2}"
