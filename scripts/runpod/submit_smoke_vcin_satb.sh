@@ -18,5 +18,8 @@ export RUN_ID
 export RUNPOD_POD_NAME
 export CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_smoke_test.yaml}"
 export USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
+export RUN_PHASE="${RUN_PHASE:-smoke}"
+export RUN_TIER="${RUN_TIER:-T1}"
+export QUALITY_GATE_MODE="${QUALITY_GATE_MODE:-none}"
 
 "${SCRIPT_DIR}/submit_phase_a_vcin_satb.sh"

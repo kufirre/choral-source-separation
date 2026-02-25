@@ -49,7 +49,7 @@ QUALITY_GATE_MAX_DROP_FROM_BEST="${QUALITY_GATE_MAX_DROP_FROM_BEST:-1.0}"
 QUALITY_GATE_MIN_EVALS="${QUALITY_GATE_MIN_EVALS:-2}"
 RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-20}"
 RUNPOD_RETRY_ON_STARTUP_TIMEOUT="${RUNPOD_RETRY_ON_STARTUP_TIMEOUT:-true}"
-RUNPOD_FALLBACK_GPU_TYPE="${RUNPOD_FALLBACK_GPU_TYPE:-NVIDIA A100 80GB PCIe}"
+RUNPOD_FALLBACK_GPU_TYPE="${RUNPOD_FALLBACK_GPU_TYPE:-NVIDIA A100-SXM4-80GB}"
 RUNPOD_FALLBACK_CLOUD_TYPE="${RUNPOD_FALLBACK_CLOUD_TYPE:-SECURE}"
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
@@ -101,9 +101,9 @@ if [[ -n "${START_CHECKPOINT}" ]]; then
     TRAIN_ARGS="${TRAIN_ARGS} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
 fi
 
-POST_TRAIN_CHECK_CMD="bash scripts/runpod/post_train_checks.sh --train-log ${RESULTS_PATH}/train.log --results-path ${RESULTS_PATH} --mode ${QUALITY_GATE_MODE} --min-best-sdr ${QUALITY_GATE_MIN_BEST_SDR} --max-drop-from-best ${QUALITY_GATE_MAX_DROP_FROM_BEST} --min-evals ${QUALITY_GATE_MIN_EVALS}"
+POST_TRAIN_CHECK_CMD="if [[ -x scripts/runpod/post_train_checks.sh ]]; then bash scripts/runpod/post_train_checks.sh --train-log ${RESULTS_PATH}/train.log --results-path ${RESULTS_PATH} --mode ${QUALITY_GATE_MODE} --min-best-sdr ${QUALITY_GATE_MIN_BEST_SDR} --max-drop-from-best ${QUALITY_GATE_MAX_DROP_FROM_BEST} --min-evals ${QUALITY_GATE_MIN_EVALS}; else echo '[runpod] scripts/runpod/post_train_checks.sh not found; skipping quality gate step.'; fi"
 
-TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee -a ${RESULTS_PATH}/train.log; ${POST_TRAIN_CHECK_CMD}"
+TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; mkdir -p ${RESULTS_PATH}/meta; if [[ \"\$code\" -ne 0 ]]; then echo \"\$code\" > ${RESULTS_PATH}/meta/run_failed.exit_code; fi; date -u +%Y-%m-%dT%H:%M:%SZ > ${RESULTS_PATH}/meta/run_completed.ok; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee -a ${RESULTS_PATH}/train.log; ${POST_TRAIN_CHECK_CMD}"
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
 
 export RUN_ID

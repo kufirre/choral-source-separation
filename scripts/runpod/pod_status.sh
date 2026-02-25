@@ -8,7 +8,7 @@ if [[ -f "${SCRIPT_DIR}/env.sh" ]]; then
     source "${SCRIPT_DIR}/env.sh"
 fi
 
-if [[ -x "${SCRIPT_DIR}/validate_env.sh" ]]; then
+if [[ "${RUNPOD_SKIP_VALIDATE:-false}" != "true" && -x "${SCRIPT_DIR}/validate_env.sh" ]]; then
     "${SCRIPT_DIR}/validate_env.sh" status
 fi
 

@@ -31,6 +31,9 @@ RUNPOD_AUTO_TERMINATE_ON_EXIT="false"
 ARTIFACT_SYNC_SECONDS="${ARTIFACT_SYNC_SECONDS:-300}"
 RUNPOD_CONTAINER_DISK_GB="${RUNPOD_CONTAINER_DISK_GB:-50}"
 RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-40}"
+RUNPOD_WAIT_READY="${RUNPOD_WAIT_READY:-true}"
+RUNPOD_READY_TIMEOUT_SECONDS="${RUNPOD_READY_TIMEOUT_SECONDS:-1800}"
+RUNPOD_READY_POLL_SECONDS="${RUNPOD_READY_POLL_SECONDS:-15}"
 
 TRAIN_CMD_DEFAULT="set -euo pipefail; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; bash scripts/runpod/bootstrap_train_env.sh || true; echo '[dev-pod] Ready. Repo synced at /workspace/choral-source-separation'; echo '[dev-pod] Run training manually, e.g. python train.py ...'; exec tail -f /dev/null"
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
@@ -45,6 +48,11 @@ export RUNPOD_VOLUME_GB
 export RUNPOD_CLOUD_TYPE
 export RUNPOD_GPU_TYPE
 export TRAIN_CMD
+export RUN_PHASE="${RUN_PHASE:-dev}"
+export RUN_TIER="${RUN_TIER:-T0}"
+export RUNPOD_WAIT_READY
+export RUNPOD_READY_TIMEOUT_SECONDS
+export RUNPOD_READY_POLL_SECONDS
 
 echo "[runpod-dev] Submitting long-lived dev pod RUN_ID=${RUN_ID}"
 echo "[runpod-dev] RUNPOD_GIT_REF=${RUNPOD_GIT_REF}"

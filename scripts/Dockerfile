@@ -51,4 +51,4 @@ COPY . /workspace/choral-source-separation
 
 RUN chmod +x scripts/vertex/*.sh
 
-ENTRYPOINT ["./scripts/vertex/entrypoint.sh"]
+ENTRYPOINT ["/workspace/choral-source-separation/scripts/vertex/entrypoint.sh"]

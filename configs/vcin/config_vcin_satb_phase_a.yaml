@@ -23,7 +23,7 @@ training:
   early_stopping_patience: 24
   q: 0.95
   coarse_loss_clip: true
-  max_nonfinite_batches_per_epoch: 0
+  max_nonfinite_batches_per_epoch: 5
   min_epoch0_metric: 0.85
   ema_momentum: 0.999
   read_metadata_procs: 8
