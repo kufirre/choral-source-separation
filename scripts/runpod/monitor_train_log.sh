@@ -14,6 +14,7 @@ RUN_ID="${2:-${RUN_ID:-}}"
 STATUS_INTERVAL_SECONDS="${STATUS_INTERVAL_SECONDS:-15}"
 TAIL_LINES="${TAIL_LINES:-120}"
 SSH_KEY_PATH="${RUNPOD_SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
+RUNPOD_PREFER_PROXY_SSH="${RUNPOD_PREFER_PROXY_SSH:-false}"
 
 if [[ -z "${POD_ID}" && -f "${RUNPOD_DIR}/last_pod_id" ]]; then
     POD_ID="$(cat "${RUNPOD_DIR}/last_pod_id")"
@@ -52,12 +53,18 @@ while true; do
         exit 1
     fi
 
-    if [[ -n "${host}" && -n "${port}" ]]; then
+    SSH_TTY_ARGS=()
+    if [[ "${RUNPOD_PREFER_PROXY_SSH}" == "true" && -n "${host_id}" ]]; then
+        ssh_target=("${host_id}@ssh.runpod.io")
+        SSH_TTY_ARGS=(-tt)
+        ssh_base=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SSH_TTY_ARGS[@]}" "${SSH_KEY_ARG[@]}" "${ssh_target[@]}")
+    elif [[ -n "${host}" && -n "${port}" ]]; then
         ssh_target=(root@"${host}")
         ssh_base=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SSH_KEY_ARG[@]}" -p "${port}" "${ssh_target[@]}")
     elif [[ -n "${host_id}" ]]; then
         ssh_target=("${host_id}@ssh.runpod.io")
-        ssh_base=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SSH_KEY_ARG[@]}" "${ssh_target[@]}")
+        SSH_TTY_ARGS=(-tt)
+        ssh_base=(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SSH_TTY_ARGS[@]}" "${SSH_KEY_ARG[@]}" "${ssh_target[@]}")
     else
         echo "[runpod-monitor] Runtime not yet reachable over SSH; waiting ${STATUS_INTERVAL_SECONDS}s."
         sleep "${STATUS_INTERVAL_SECONDS}"
@@ -66,9 +73,25 @@ while true; do
 
     if "${ssh_base[@]}" "bash -lc 'test -f /workspace/choral-source-separation/artifacts/${RUN_ID}/train.log'" >/dev/null 2>&1; then
         echo "[runpod-monitor] Streaming /workspace/choral-source-separation/artifacts/${RUN_ID}/train.log"
-        exec "${ssh_base[@]}" "bash -lc 'tail -n ${TAIL_LINES} -f /workspace/choral-source-separation/artifacts/${RUN_ID}/train.log'"
+        stream_started_at="$(date +%s)"
+        set +e
+        "${ssh_base[@]}" "bash -lc 'tail -n ${TAIL_LINES} -f /workspace/choral-source-separation/artifacts/${RUN_ID}/train.log'"
+        tail_status=$?
+        set -e
+        stream_ended_at="$(date +%s)"
+        stream_duration="$((stream_ended_at - stream_started_at))"
+        if [[ "${tail_status}" -eq 0 && "${stream_duration}" -ge 20 ]]; then
+            echo "[runpod-monitor] Log stream ended cleanly."
+            exit 0
+        fi
+        echo "[runpod-monitor] Log stream disconnected early (status=${tail_status}, duration=${stream_duration}s); retrying in ${STATUS_INTERVAL_SECONDS}s."
+        sleep "${STATUS_INTERVAL_SECONDS}"
+        continue
     fi
-
-    echo "[runpod-monitor] SSH reachable but train.log not ready yet (or SSH command failed); waiting ${STATUS_INTERVAL_SECONDS}s."
+    if "${ssh_base[@]}" "bash -lc 'pgrep -fa \"python .*train.py\"'" >/dev/null 2>&1; then
+        echo "[runpod-monitor] Train process is up; train.log not visible yet. Waiting ${STATUS_INTERVAL_SECONDS}s."
+    else
+        echo "[runpod-monitor] SSH reachable but train process/log not ready yet. Waiting ${STATUS_INTERVAL_SECONDS}s."
+    fi
     sleep "${STATUS_INTERVAL_SECONDS}"
 done

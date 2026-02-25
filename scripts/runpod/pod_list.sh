@@ -19,6 +19,9 @@ RUNPOD_PODS_RESPONSE="${RESPONSE}" python3 - <<'PY'
 import json
 import os
 pods = json.loads(os.environ["RUNPOD_PODS_RESPONSE"])
+if not pods:
+    print("[runpod] No active pods.")
+    raise SystemExit(0)
 for pod in pods:
     pod_id = pod.get("id", "")
     name = pod.get("name", "")
