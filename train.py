@@ -402,35 +402,53 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
 
-            grad_norm = None
-            if config.training.grad_clip:
-                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
-
-            if grad_norm is not None:
-                grad_norm_value = float(grad_norm.detach().cpu().item() if torch.is_tensor(grad_norm) else grad_norm)
-
-                if should_print and grad_norm_log_every > 0 and (i % grad_norm_log_every == 0):
-                    print(f"[grad] epoch={epoch} step={i} grad_norm={grad_norm_value:.6e}")
+            params_with_grad = [param for param in model.parameters() if param.grad is not None]
+            if len(params_with_grad) == 0:
+                if should_print:
+                    print(f"[grad] No gradients at epoch {epoch} step {i}; skipping optimizer step.")
                     sys.stdout.flush()
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
-                if not np.isfinite(grad_norm_value):
-                    nonfinite_batches += 1
-                    if should_print:
-                        print(
-                            f"Non-finite grad norm at epoch {epoch} step {i} "
-                            f"(count {nonfinite_batches})."
-                        )
-                        sys.stdout.flush()
-                        _report_nonfinite_gradients(
-                            model.module if ddp else model,
-                            topk=nonfinite_grad_report_topk,
-                        )
-                    optimizer.zero_grad(set_to_none=True)
-                    if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
-                        raise FloatingPointError(
-                            f"Too many non-finite gradients in epoch {epoch}: {nonfinite_batches}"
-                        )
-                    continue
+            grad_norm_terms = []
+            for param in params_with_grad:
+                grad = param.grad.detach()
+                if grad.is_sparse:
+                    grad = grad.coalesce().values()
+                grad_norm_terms.append(torch.norm(grad.float(), p=2))
+
+            grad_norm = torch.norm(torch.stack(grad_norm_terms), p=2)
+            grad_norm_value = float(grad_norm.detach().cpu().item())
+
+            if config.training.grad_clip:
+                nn.utils.clip_grad_norm_(
+                    params_with_grad,
+                    config.training.grad_clip,
+                    error_if_nonfinite=False,
+                )
+
+            if should_print and grad_norm_log_every > 0 and (i % grad_norm_log_every == 0):
+                print(f"[grad] epoch={epoch} step={i} grad_norm={grad_norm_value:.6e}")
+                sys.stdout.flush()
+
+            if not np.isfinite(grad_norm_value):
+                nonfinite_batches += 1
+                if should_print:
+                    print(
+                        f"Non-finite grad norm at epoch {epoch} step {i} "
+                        f"(count {nonfinite_batches})."
+                    )
+                    sys.stdout.flush()
+                    _report_nonfinite_gradients(
+                        model.module if ddp else model,
+                        topk=nonfinite_grad_report_topk,
+                    )
+                optimizer.zero_grad(set_to_none=True)
+                if max_nonfinite_batches >= 0 and nonfinite_batches > max_nonfinite_batches:
+                    raise FloatingPointError(
+                        f"Too many non-finite gradients in epoch {epoch}: {nonfinite_batches}"
+                    )
+                continue
 
             if scaler.is_enabled():
                 scaler.step(optimizer)
