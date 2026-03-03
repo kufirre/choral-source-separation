@@ -13,9 +13,12 @@ export IMAGE_NAME="${IMAGE_NAME:-choral-source-separation}"
 export TAG="${TAG:-latest}"
 export DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 export DOCKERFILE_PATH="${DOCKERFILE_PATH:-scripts/Dockerfile}"
+# Docker backend is the default because Kaniko COPY-layer caching caused
+# stale/missing-file failures in this repo.
 export CLOUD_CACHE_BACKEND="${CLOUD_CACHE_BACKEND:-docker}"
 export KANIKO_CACHE_REPO="${KANIKO_CACHE_REPO:-}"
 export KANIKO_CACHE_TTL="${KANIKO_CACHE_TTL:-336h}"
+export KANIKO_CACHE_COPY_LAYERS="${KANIKO_CACHE_COPY_LAYERS:-false}"
 
 # Vertex compute defaults
 export MACHINE_TYPE="${MACHINE_TYPE:-a3-highgpu-1g}"

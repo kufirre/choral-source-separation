@@ -12,7 +12,7 @@ RUN_ID="${RUN_ID:-phase-b-vcin-satb-mixit-$(date +%Y%m%d-%H%M%S)}"
 JOB_NAME="${JOB_NAME:-${RUN_ID}}"
 
 MODEL_TYPE="${MODEL_TYPE:-vcin}"
-CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_b.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_b_fullpaper.yaml}"
 DATASET_TYPE="${DATASET_TYPE:-6}"
 TRAIN_DATA_PATHS="${TRAIN_DATA_PATHS:-/gcs_data/processed/Dagstuhl_ChoirSet_satb}"
 VALID_DATA_PATHS="${VALID_DATA_PATHS:-/gcs_data/processed/ESMUC_Choir_satb}"
@@ -22,7 +22,6 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 DEVICE_IDS="${DEVICE_IDS:-0}"
 USE_CHECKPOINT="${USE_CHECKPOINT:-true}"
 START_CHECKPOINT="${START_CHECKPOINT:-}"
-CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_only_compatible_weights}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
@@ -49,7 +48,7 @@ if [[ ! -f "${CONFIG_PATH_CHECK}" ]]; then
     exit 1
 fi
 
-TRAIN_CMD_DEFAULT="python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS} ${EXTRA_TRAIN_ARGS}"
+TRAIN_CMD_DEFAULT="python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} --num_workers ${NUM_WORKERS} --device_ids ${DEVICE_IDS} --start_check_point ${START_CHECKPOINT} ${EXTRA_TRAIN_ARGS}"
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
 
 export RUN_ID

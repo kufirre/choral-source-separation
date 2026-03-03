@@ -21,7 +21,7 @@ else
 fi
 
 MODEL_TYPE="${MODEL_TYPE:-vcin}"
-CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a_stable.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a_staged.yaml}"
 DATASET_TYPE="${DATASET_TYPE:-4}"
 TRAIN_DATA_PATHS="${TRAIN_DATA_PATHS:-/gcs_data/processed/CSD_satb /gcs_data/processed/ChoralSynth_satb /gcs_data/processed/jaCappella_satb}"
 VALID_DATA_PATHS="${VALID_DATA_PATHS:-/gcs_data/processed/Cantoria_satb}"
@@ -35,8 +35,10 @@ DEVICE_IDS="${DEVICE_IDS:-0}"
 ALLOW_BLEED_DATASETS="${ALLOW_BLEED_DATASETS:-false}"
 USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 START_CHECKPOINT="${START_CHECKPOINT:-}"
-CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_only_compatible_weights}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+RESUME_MODE="${RESUME_MODE:-bootstrap}" # bootstrap|resume
+BOOTSTRAP_LOAD_FLAGS="${BOOTSTRAP_LOAD_FLAGS---partial_backbone_load}"
+RESUME_LOAD_FLAGS="${RESUME_LOAD_FLAGS:---load_optimizer --load_scheduler --load_epoch --load_best_metric --load_all_metrics --load_all_losses}"
 BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-bash scripts/runpod/bootstrap_train_env.sh}"
 RUNPOD_REPO_URL="${RUNPOD_REPO_URL:-https://github.com/kufirre/choral-source-separation.git}"
 RUNPOD_GIT_REF="${RUNPOD_GIT_REF:-vcin-dev}"
@@ -51,6 +53,11 @@ RUNPOD_VOLUME_GB="${RUNPOD_VOLUME_GB:-20}"
 RUNPOD_RETRY_ON_STARTUP_TIMEOUT="${RUNPOD_RETRY_ON_STARTUP_TIMEOUT:-true}"
 RUNPOD_FALLBACK_GPU_TYPE="${RUNPOD_FALLBACK_GPU_TYPE:-NVIDIA A100-SXM4-80GB}"
 RUNPOD_FALLBACK_CLOUD_TYPE="${RUNPOD_FALLBACK_CLOUD_TYPE:-SECURE}"
+
+if [[ "${RESUME_MODE}" != "bootstrap" && "${RESUME_MODE}" != "resume" ]]; then
+    echo "Invalid RESUME_MODE='${RESUME_MODE}'. Expected 'bootstrap' or 'resume'." >&2
+    exit 1
+fi
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
     export BOOTSTRAP_CKPT_URI="${BOOTSTRAP_CKPT_URI:-${START_CHECKPOINT}}"
@@ -98,12 +105,17 @@ fi
 
 TRAIN_ARGS="--model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} ${DATALOADER_ARGS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
 if [[ -n "${START_CHECKPOINT}" ]]; then
-    TRAIN_ARGS="${TRAIN_ARGS} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
+    TRAIN_ARGS="${TRAIN_ARGS} --start_check_point ${START_CHECKPOINT}"
+    if [[ "${RESUME_MODE}" == "resume" ]]; then
+        TRAIN_ARGS="${TRAIN_ARGS} ${RESUME_LOAD_FLAGS}"
+    elif [[ -n "${BOOTSTRAP_LOAD_FLAGS}" ]]; then
+        TRAIN_ARGS="${TRAIN_ARGS} ${BOOTSTRAP_LOAD_FLAGS}"
+    fi
 fi
 
 POST_TRAIN_CHECK_CMD="if [[ -x scripts/runpod/post_train_checks.sh ]]; then bash scripts/runpod/post_train_checks.sh --train-log ${RESULTS_PATH}/train.log --results-path ${RESULTS_PATH} --mode ${QUALITY_GATE_MODE} --min-best-sdr ${QUALITY_GATE_MIN_BEST_SDR} --max-drop-from-best ${QUALITY_GATE_MAX_DROP_FROM_BEST} --min-evals ${QUALITY_GATE_MIN_EVALS}; else echo '[runpod] scripts/runpod/post_train_checks.sh not found; skipping quality gate step.'; fi"
 
-TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; mkdir -p ${RESULTS_PATH}/meta; if [[ \"\$code\" -ne 0 ]]; then echo \"\$code\" > ${RESULTS_PATH}/meta/run_failed.exit_code; fi; date -u +%Y-%m-%dT%H:%M:%SZ > ${RESULTS_PATH}/meta/run_completed.ok; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee -a ${RESULTS_PATH}/train.log; ${POST_TRAIN_CHECK_CMD}"
+TRAIN_CMD_DEFAULT="set -euo pipefail; cleanup(){ code=\$?; mkdir -p ${RESULTS_PATH}/meta; if [[ \"\$code\" -ne 0 ]]; then echo \"\$code\" > ${RESULTS_PATH}/meta/run_failed.exit_code; else date -u +%Y-%m-%dT%H:%M:%SZ > ${RESULTS_PATH}/meta/run_completed.ok; fi; if [[ \"\${RUNPOD_AUTO_TERMINATE_ON_EXIT:-false}\" == \"true\" ]]; then bash scripts/runpod/terminate_self.sh || true; fi; exit \$code; }; trap cleanup EXIT; TMP_REPO=/tmp/choral-source-separation; rm -rf \"\$TMP_REPO\"; git clone --depth 1 --branch ${RUNPOD_GIT_REF} ${RUNPOD_REPO_URL} \"\$TMP_REPO\"; mkdir -p ${WORKSPACE_DIR}; cp -a \"\$TMP_REPO\"/. ${WORKSPACE_DIR}/; cd ${WORKSPACE_DIR}; ${BOOTSTRAP_CMD}; python train.py ${TRAIN_ARGS} 2>&1 | tee -a ${RESULTS_PATH}/train.log; ${POST_TRAIN_CHECK_CMD}"
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
 
 export RUN_ID

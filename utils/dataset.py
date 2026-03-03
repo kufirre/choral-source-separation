@@ -30,11 +30,25 @@ import argparse
 
 def _collate_with_active_stems(batch):
     """Collate dataset_type=7 batches while preserving per-sample active stem ids."""
-    stems, mixes, active_stem_ids = zip(*batch)
-    stems = torch.stack(stems, dim=0)
-    mixes = torch.stack(mixes, dim=0)
-    active_stem_ids = [list(sample_ids) for sample_ids in active_stem_ids]
-    return stems, mixes, active_stem_ids
+    if len(batch) == 0:
+        return batch
+
+    sample_len = len(batch[0])
+    if sample_len == 3:
+        stems, mixes, active_stem_ids = zip(*batch)
+        stems = torch.stack(stems, dim=0)
+        mixes = torch.stack(mixes, dim=0)
+        active_stem_ids = [list(sample_ids) for sample_ids in active_stem_ids]
+        return stems, mixes, active_stem_ids
+    if sample_len == 4:
+        stems, mixes, active_stem_ids, f0_targets = zip(*batch)
+        stems = torch.stack(stems, dim=0)
+        mixes = torch.stack(mixes, dim=0)
+        active_stem_ids = [list(sample_ids) for sample_ids in active_stem_ids]
+        f0_targets = torch.stack(f0_targets, dim=0)
+        return stems, mixes, active_stem_ids, f0_targets
+
+    raise ValueError(f"Unsupported dataset_type=7 sample length: {sample_len}")
 
 
 def prepare_data(config: Union[ConfigDict, OmegaConf], args: argparse.Namespace, batch_size: int) -> DataLoader:
@@ -224,6 +238,16 @@ class MSSDataset(torch.utils.data.Dataset):
         self.batch_size = batch_size
         self.file_types = ['wav', 'flac']
         self.metadata_path = metadata_path
+        model_cfg = config.model if 'model' in config else {}
+        pitch_nll_weight = float(model_cfg.get('pitch_nll_loss_weight', 0.0))
+        self.emit_f0_target = bool(config.training.get('emit_f0_target', pitch_nll_weight > 0.0))
+        self.f0_sample_rate = int(config.training.get('samplerate', 44100))
+        self.f0_min_hz = float(model_cfg.get('pitch_nll_f0_min_hz', config.training.get('f0_min_hz', 65.0)))
+        self.f0_max_hz = float(model_cfg.get('pitch_nll_f0_max_hz', config.training.get('f0_max_hz', 1047.0)))
+        self.f0_window_size = int(config.training.get('f0_window_size', 8192))
+        self.f0_window_hop = int(config.training.get('f0_window_hop', 2048))
+        self.f0_rms_threshold = float(config.training.get('f0_rms_threshold', 1.0e-4))
+        self.f0_autocorr_threshold = float(config.training.get('f0_autocorr_threshold', 0.2))
 
         should_print = (not dist.is_initialized() or dist.get_rank() == 0)
 
@@ -256,6 +280,11 @@ class MSSDataset(torch.utils.data.Dataset):
         self.chunk_size = config.audio.chunk_size
         self.min_mean_abs = config.audio.min_mean_abs
         self.do_chunks = config.training.get('precompute_chunks', False) and float(self.min_mean_abs) > 0
+        if self.emit_f0_target and self.verbose and should_print:
+            print(
+                'Emit f0_target: enabled '
+                f'(sr={self.f0_sample_rate}, range=[{self.f0_min_hz:.1f}, {self.f0_max_hz:.1f}] Hz)'
+            )
         # For dataset_type 5 - precompute all chunks
         if self.dataset_type == 5 or (self.dataset_type == 4 or self.dataset_type == 6) and self.do_chunks:
              self._initialize_chunks_metadata()
@@ -284,6 +313,8 @@ class MSSDataset(torch.utils.data.Dataset):
                     res, mix = self.load_aligned_data()
                 else:
                     res, _ = self.load_aligned_data()
+
+        f0_target = self._compute_f0_target(res) if self.emit_f0_target else None
 
         # Randomly change loudness of each stem
         if self.aug:
@@ -318,12 +349,99 @@ class MSSDataset(torch.utils.data.Dataset):
         # If we need to optimize only given stem
         if self.config.training.target_instrument is not None:
             index = self.config.training.instruments.index(self.config.training.target_instrument)
+            if f0_target is not None:
+                return res[index:index+1], mix, f0_target[index:index+1]
             return res[index:index+1], mix
 
         if self.dataset_type==7:
+            if f0_target is not None:
+                return res, mix, active_stem_ids, f0_target
             return res, mix, active_stem_ids
 
+        if f0_target is not None:
+            return res, mix, f0_target
         return res, mix
+
+    def _compute_f0_target(self, stems) -> torch.Tensor:
+        """
+        Estimate one f0 per voice for the current chunk.
+
+        Output shape is (num_stems,), in Hz. Unvoiced/silent stems are 0.
+        """
+        if torch.is_tensor(stems):
+            stems_np = stems.detach().cpu().numpy()
+        else:
+            stems_np = np.asarray(stems)
+
+        if stems_np.ndim != 3:
+            return torch.zeros(len(self.instruments), dtype=torch.float32)
+
+        f0_values = np.zeros((len(self.instruments),), dtype=np.float32)
+        num_stems = min(stems_np.shape[0], len(self.instruments))
+        for stem_idx in range(num_stems):
+            f0_values[stem_idx] = self._estimate_stem_f0_hz(stems_np[stem_idx])
+
+        return torch.tensor(f0_values, dtype=torch.float32)
+
+    def _estimate_stem_f0_hz(self, stem_audio: np.ndarray) -> float:
+        """Estimate f0 from a stem chunk using normalized autocorrelation."""
+        if stem_audio.ndim != 2:
+            return 0.0
+
+        mono = stem_audio.mean(axis=0).astype(np.float32, copy=False)
+        if mono.size < 8:
+            return 0.0
+
+        rms = float(np.sqrt(np.mean(mono ** 2)))
+        if not np.isfinite(rms) or rms < self.f0_rms_threshold:
+            return 0.0
+
+        window_size = int(min(max(self.f0_window_size, 128), mono.shape[0]))
+        if mono.shape[0] > window_size:
+            hop = int(max(1, self.f0_window_hop))
+            best_start = 0
+            best_energy = -1.0
+            for start in range(0, mono.shape[0] - window_size + 1, hop):
+                seg = mono[start:start + window_size]
+                energy = float(np.mean(seg ** 2))
+                if energy > best_energy:
+                    best_energy = energy
+                    best_start = start
+            mono = mono[best_start:best_start + window_size]
+
+        mono = mono - np.mean(mono)
+        if float(np.sqrt(np.mean(mono ** 2))) < self.f0_rms_threshold:
+            return 0.0
+
+        signal_len = mono.shape[0]
+        # next power-of-two >= 2 * signal_len for fast autocorrelation via FFT
+        fft_size = 1 << int(np.ceil(np.log2(max(2 * signal_len, 2))))
+        spectrum = np.fft.rfft(mono, n=fft_size)
+        autocorr = np.fft.irfft(spectrum * np.conj(spectrum), n=fft_size)[:signal_len]
+
+        energy = float(max(autocorr[0], 1.0e-8))
+        min_lag = int(self.f0_sample_rate / max(self.f0_max_hz, 1.0))
+        max_lag = int(self.f0_sample_rate / max(self.f0_min_hz, 1.0))
+        min_lag = max(min_lag, 1)
+        max_lag = min(max_lag, signal_len - 1)
+        if max_lag <= min_lag:
+            return 0.0
+
+        lag_region = autocorr[min_lag:max_lag + 1]
+        if lag_region.size == 0:
+            return 0.0
+        lag_idx = int(np.argmax(lag_region))
+        best_lag = lag_idx + min_lag
+        peak_val = float(lag_region[lag_idx]) / energy
+        if not np.isfinite(peak_val) or peak_val < self.f0_autocorr_threshold:
+            return 0.0
+
+        f0_hz = float(self.f0_sample_rate) / float(best_lag)
+        if not np.isfinite(f0_hz):
+            return 0.0
+        if f0_hz < self.f0_min_hz or f0_hz > self.f0_max_hz:
+            return 0.0
+        return f0_hz
 
 
     def _build_class_to_tracks(self):

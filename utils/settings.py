@@ -47,6 +47,9 @@ def parse_args_train(dict_args: Union[argparse.Namespace, Dict, None]) -> argpar
                         help="Load all metrics from checkpoint (if available)")
     parser.add_argument("--load_all_losses", action='store_true',
                         help="Load all losses from checkpoint (if available)")
+    parser.add_argument("--partial_backbone_load", action='store_true',
+                        help="For VCIN: load only shared backbone encoder from checkpoint "
+                             "(e.g. 4-output TS-BSMamba2 → 10-output VCIN bootstrap)")
     parser.add_argument("--safe_mode", action='store_true',
                         help="Ignore forward errors")
     parser.add_argument("--results_path", type=str,
@@ -89,19 +92,13 @@ def parse_args_train(dict_args: Union[argparse.Namespace, Dict, None]) -> argpar
     parser.add_argument("--train_lora_loralib", action='store_true', help="Training with LoRA from loralib")
     parser.add_argument("--lora_checkpoint_peft", type=str, default='', help="Initial checkpoint to LoRA weights")
     parser.add_argument("--lora_checkpoint_loralib", type=str, default='', help="Initial checkpoint to LoRA weights")
-    parser.add_argument("--each_metrics_in_name", action='store_true',
-                        help="All stems in naming checkpoints")
     parser.add_argument("--use_standard_loss", action='store_true',
                         help="Roformers will use provided loss instead of internal")
-    parser.add_argument("--save_weights_every_epoch", action='store_true',
-                        help="Weights will be saved every epoch with all metric values")
     parser.add_argument("--persistent_workers", action='store_true',
                         help="dataloader persistent_workers")
     parser.add_argument("--prefetch_factor", type=int, default=None,
                         help="dataloader prefetch_factor")
     parser.add_argument("--set_per_process_memory_fraction", action='store_true',
-                        help="using only VRAM, no RAM")
-    parser.add_argument("--load_only_compatible_weights", action='store_true',
                         help="using only VRAM, no RAM")
     parser.add_argument("--freeze_layers", nargs="+", type=str,
                         help="List of layers to freeze. Use prefixes e.g. layer1 - will freeze all layers whose names "
@@ -123,6 +120,7 @@ def parse_args_train(dict_args: Union[argparse.Namespace, Dict, None]) -> argpar
             'mel_band_roformer',
             'bs_roformer',
             'vcin',
+            'vcin_direct4',
             'mel_band_conformer',
             'bs_conformer',
         )
@@ -342,6 +340,9 @@ def get_model_from_config(model_type: str, config_path: str) -> Tuple[nn.Module,
     elif model_type == 'vcin':
         from models.vcin import VCINModel
         model = VCINModel(**dict(config.model))
+    elif model_type == 'vcin_direct4':
+        from models.vcin import VCINDirect4Model
+        model = VCINDirect4Model(**dict(config.model))
     elif model_type == 'swin_upernet':
         from models.upernet_swin_transformers import Swin_UperNet_Model
         model = Swin_UperNet_Model(config)
@@ -392,18 +393,35 @@ def get_scheduler(config, optimizer):
     if scheduler_name == 'linear_scheduler':
         from transformers import get_linear_schedule_with_warmup
         num_training_steps = config.training.num_epochs * config.training.num_steps
+        if 'num_warmup_steps' not in config.training:
+            raise ValueError(
+                "config.training.num_warmup_steps is required when "
+                "scheduler='linear_scheduler'."
+            )
         num_warmup_steps = config.training.num_warmup_steps
         scheduler = get_linear_schedule_with_warmup(
             optimizer,
             num_warmup_steps=num_warmup_steps,
             num_training_steps=num_training_steps
         )
+    elif scheduler_name == 'constant_with_warmup':
+        from transformers import get_constant_schedule_with_warmup
+        if 'num_warmup_steps' not in config.training:
+            raise ValueError(
+                "config.training.num_warmup_steps is required when "
+                "scheduler='constant_with_warmup'."
+            )
+        num_warmup_steps = config.training.num_warmup_steps
+        scheduler = get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+        )
     elif scheduler_name == 'ReduceLROnPlateau':
         from torch.optim.lr_scheduler import ReduceLROnPlateau
         scheduler = ReduceLROnPlateau(optimizer, 'max', patience=config.training.patience,
                                       factor=config.training.reduce_factor)
     else:
-        available_schedulers = ['linear_scheduler', 'ReduceLROnPlateau']
+        available_schedulers = ['linear_scheduler', 'constant_with_warmup', 'ReduceLROnPlateau']
         raise ValueError(
             f"Unknown scheduler '{scheduler_name}'. "
             f"Available options: {available_schedulers}. "

@@ -1,5 +1,26 @@
-# Smoke test config — mirrors the Gate B config (minimal over-separation)
-# but with reduced depth, epochs, and steps for quick validation.
+# Gate B: Minimal over-separation test.
+#
+# This config isolates a SINGLE variable vs the Direct-4 baseline (Gate A):
+#   "Does M=10 -> V=4 soft-assignment grouping itself improve SDR?"
+#
+# Only reconstruction losses + lightweight latent/assignment regularization.
+# ALL auxiliary modules are OFF (no pitch, gate, intent, voicing, FiLM, CGP).
+# Homoscedastic weighting is OFF (fixed loss weights, no learned balancing).
+#
+# Active loss terms (6 total, vs ~12 in the old staged config):
+#   1. stage2 reconstruction (L1 + multi-resolution STFT)
+#   2. stage1 reconstruction (L1 + multi-resolution STFT)
+#   3. min_energy (prevent dead latent sources)
+#   4. duplicate (prevent redundant latent sources)
+#   5. assignment_entropy (prevent assignment collapse)
+#   6. assignment_capacity (balanced voice allocation)
+#
+# Gate ladder:
+#   Gate A: direct-4 baseline         (config_vcin_satb_direct4_baseline.yaml)
+#   Gate B: minimal over-sep (this)   — must beat Gate A SDR
+#   Gate C: + auxiliary losses         (config_vcin_satb_phase_a_staged.yaml)
+#   Gate D: + FiLM / repulsion        — raise weights in staged config
+#   Gate E: + CGP / full model        (config_vcin_satb_phase_a_fullpaper.yaml)
 
 audio:
   chunk_size: 132300
@@ -17,14 +38,15 @@ training:
   normalize: true
   instruments: ['S', 'A', 'T', 'B']
   target_instrument: null
-  num_epochs: 2
-  num_steps: 25
+  num_epochs: 120
+  num_steps: 300
   optimizer: adamw
-  lr: 3.0e-4
+  lr: 2.0e-4
   scheduler: constant_with_warmup
-  num_warmup_steps: 10        # reduced for smoke test (only 25 steps/epoch)
-  patience: 2
-  reduce_factor: 0.95
+  num_warmup_steps: 500       # ~1.7 epochs: ramp LR 0 -> 2e-4 to protect warm encoder
+  patience: 6
+  reduce_factor: 0.8
+  early_stopping_patience: 24
   q: 0.95
   coarse_loss_clip: true
   max_nonfinite_batches_per_epoch: 5
@@ -44,11 +66,11 @@ optimizer:
 
 model:
   dim: 128
-  depth: 6
+  depth: 12
   stereo: true
   num_stems: 4
   num_latent_sources: 10
-  num_iterations: 1          # K=1: matches Gate B
+  num_iterations: 1          # K=1: single pass, no iterative feedback
   backbone_type: ts_bsmamba2
   ts_sr: 44100
   ts_win: 2048
@@ -57,7 +79,7 @@ model:
   ts_num_repeat_mask: 8
   ts_num_repeat_map: 4
 
-  # Reconstruction losses only
+  # --- Reconstruction losses (the ONLY signal for separation quality) ---
   stage1_loss_weight: 1.0
   stage2_loss_weight: 1.0
   stft_n_fft: 2048
@@ -71,13 +93,16 @@ model:
   multi_stft_hop_size: 147
   multi_stft_normalized: false
 
-  # Latent regularizers
+  # --- Latent regularizers (prevent degenerate M=10 solutions) ---
   min_energy_epsilon: 1.0e-4
   min_energy_loss_weight: 1.0e-3
   duplicate_cos_threshold: 0.95
   duplicate_loss_weight: 1.0e-3
 
-  # Assignment regularizers (lightweight)
+  # --- Assignment regularizers (prevent assignment matrix collapse) ---
+  # Weights 10x smaller than old staged config — just enough to prevent
+  # degenerate all-mass-on-one-voice solutions. Let reconstruction gradient
+  # be the dominant signal for learning the assignment.
   assignment_entropy_weight: 1.0e-4
   assignment_capacity_loss_weight: 1.0e-4
   assignment_capacity_targets: !!python/tuple
@@ -86,7 +111,7 @@ model:
   - 0.25
   - 0.25
 
-  # Everything else OFF — matches Gate B
+  # --- Everything else is OFF ---
   repulsion_loss_weight: 0.0
   cgp_loss_weight: 0.0
   magnitude_penalty_loss_weight: 0.0
@@ -102,19 +127,21 @@ model:
   gate_mean_loss_weight: 0.0
   gate_mean_target: 0.5
   tail_inertia_weight: 0.0
+
+  # NO warmups needed (no auxiliary losses to ramp)
   cgp_warmup_steps: 0
   repulsion_warmup_steps: 0
   magnitude_penalty_warmup_steps: 0
   film_warmup_steps: 0
 
-  # No homoscedastic weighting
+  # NO homoscedastic weighting — fixed loss weights, no learned balancing
   use_homoscedastic_weighting: false
   homoscedastic_init: 0.0
 
-  # All auxiliary modules OFF — matches Gate B
+  # ALL auxiliary modules OFF — saves VRAM, eliminates self-consistency traps
   enable_repulsion: false
   enable_pitch: false
-  enable_assignment: true
+  enable_assignment: true     # required: soft assignment M -> V
   enable_gate: false
   enable_intent: false
   enable_voicing_head: false
@@ -123,6 +150,7 @@ model:
   enable_film: false
   detach_conditioning_before_film: false
 
+  # Module dimensions (only assignment module uses these)
   embed_dim: 64
   pitch_num_components: 3
   dim_head: 64
@@ -130,6 +158,8 @@ model:
   ff_dropout: 0.1
   attn_dropout: 0.1
   flash_attn: true
+
+  # Params accepted by VCINModel but unused with modules off
   time_module_depth: 1
   freq_module_depth: 1
   mask_estimator_depth: 2
@@ -141,7 +171,7 @@ augmentations:
   loudness: true
   loudness_min: 0.5
   loudness_max: 1.5
-  mixup: false
+  mixup: true
   mixup_probs:
     !!python/tuple
     - 0.2

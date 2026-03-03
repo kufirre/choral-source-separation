@@ -18,7 +18,6 @@ import auraloss
 import torch.nn as nn
 from torch.optim import Adam, AdamW, SGD, RAdam, RMSprop
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from accelerate import Accelerator
@@ -26,7 +25,7 @@ from accelerate import Accelerator
 from utils.dataset import MSSDataset
 from utils.model_utils import demix, prefer_target_instrument, load_not_compatible_weights
 from utils.metrics import sdr
-from utils.settings import manual_seed, get_model_from_config
+from utils.settings import manual_seed, get_model_from_config, get_scheduler
 from utils.losses import masked_loss
 import warnings
 
@@ -241,14 +240,7 @@ def train_model(args):
             batch_size,
             config.training.optimizer,
         ))
-    # Reduce LR if no SDR improvements for several epochs
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        'max',
-        # patience=accelerator.num_processes * config.training.patience, # This is strange place...
-        patience=config.training.patience,
-        factor=config.training.reduce_factor
-    )
+    scheduler = get_scheduler(config, optimizer)
 
     if args.use_multistft_loss:
         try:
@@ -303,8 +295,22 @@ def train_model(args):
 
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
         for i, data in enumerate(pbar):
-            if len(data) == 3:
-                batch, mixes, active_stem_ids = data
+            f0_target = None
+            if len(data) == 4:
+                batch, mixes, third, fourth = data
+                if torch.is_tensor(third):
+                    active_stem_ids = fourth
+                    f0_target = third
+                else:
+                    active_stem_ids = third
+                    f0_target = fourth if torch.is_tensor(fourth) else None
+            elif len(data) == 3:
+                batch, mixes, third = data
+                if torch.is_tensor(third):
+                    active_stem_ids = None
+                    f0_target = third
+                else:
+                    active_stem_ids = third
             elif len(data) == 2:
                 batch, mixes = data
                 active_stem_ids = None
@@ -313,8 +319,9 @@ def train_model(args):
 
             y = batch
             x = mixes
+            f0_kwargs = {'f0_target': f0_target} if f0_target is not None else {}
 
-            if args.model_type in ['mel_band_roformer', 'bs_roformer', 'vcin', 'mel_band_conformer', 'bs_conformer']:
+            if args.model_type in ['mel_band_roformer', 'bs_roformer', 'vcin', 'vcin_direct4', 'mel_band_conformer', 'bs_conformer']:
                 # loss is computed in forward pass
                 if (
                     active_stem_ids is not None
@@ -324,16 +331,20 @@ def train_model(args):
                 ):
                     losses = []
                     for sample_idx, sample_ids in enumerate(active_stem_ids):
+                        sample_f0 = {
+                            'f0_target': f0_target[sample_idx: sample_idx + 1]
+                        } if f0_target is not None else {}
                         losses.append(
                             model(
                                 x[sample_idx: sample_idx + 1],
                                 y[sample_idx: sample_idx + 1],
                                 active_stem_ids=_normalize_active_stem_ids(sample_ids),
+                                **sample_f0,
                             )
                         )
                     loss = torch.stack(losses).mean()
                 else:
-                    loss = model(x, y, active_stem_ids=_normalize_active_stem_ids(active_stem_ids))
+                    loss = model(x, y, active_stem_ids=_normalize_active_stem_ids(active_stem_ids), **f0_kwargs)
             else:
                 y_ = model(x)
                 if args.use_multistft_loss:
@@ -362,6 +373,8 @@ def train_model(args):
                 accelerator.clip_grad_norm_(model.parameters(), config.training.grad_clip)
 
             optimizer.step()
+            if scheduler.name in ['linear_scheduler', 'constant_with_warmup']:
+                scheduler.step()
             optimizer.zero_grad()
 
             if ema_model is not None:
@@ -424,7 +437,8 @@ def train_model(args):
                     accelerator.save(unwrapped_model.state_dict(), store_path)
                 best_sdr = sdr_avg
 
-            scheduler.step(sdr_avg)
+            if scheduler.name in ['ReduceLROnPlateau']:
+                scheduler.step(sdr_avg)
 
         sdr_list = None
         accelerator.wait_for_everyone()

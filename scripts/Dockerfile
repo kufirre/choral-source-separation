@@ -31,7 +31,9 @@ RUN printf '%s\n' \
       'torchaudio==2.2.2' \
     > /tmp/torch-constraints.txt
 
-RUN python -m pip install --upgrade pip \
+RUN REQ_FILE=requirements-vertex.txt \
+    && if [ ! -f "${REQ_FILE}" ]; then REQ_FILE=requirements.txt; fi \
+    && python -m pip install --upgrade pip \
     && python -m pip install \
         --index-url https://download.pytorch.org/whl/cu121 \
         --extra-index-url https://pypi.org/simple \
@@ -39,7 +41,7 @@ RUN python -m pip install --upgrade pip \
         torchvision==0.17.2 \
         torchaudio==2.2.2 \
     && PIP_CONSTRAINT=/tmp/torch-constraints.txt \
-       python -m pip install --no-build-isolation -r requirements-vertex.txt \
+       python -m pip install --no-build-isolation -r "${REQ_FILE}" \
     && python -m pip install --no-build-isolation causal-conv1d==1.4.0 \
     && python -m pip install --no-build-isolation --no-deps mamba-ssm==2.2.2 \
     && python -m pip install --no-build-isolation --no-deps "torch_log_wmse>=0.3.1" \

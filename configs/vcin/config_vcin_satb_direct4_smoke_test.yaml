@@ -1,15 +1,15 @@
+# Gate A smoke test: Direct-4 baseline with reduced depth/epochs.
+
 audio:
-  chunk_size: 132300  # samplerate * segment
+  chunk_size: 132300
   hop_length: 1024
   min_mean_abs: 0.0
 
 training:
+  model_type: vcin_direct4
   batch_size: 4
   gradient_accumulation_steps: 1
   grad_clip: 0.5
-  grad_norm_log_every: 5
-  vcin_log_loss_breakdown_every: 5
-  nonfinite_grad_report_topk: 12
   segment: 11
   shift: 1
   samplerate: 44100
@@ -18,9 +18,9 @@ training:
   instruments: ['S', 'A', 'T', 'B']
   target_instrument: null
   num_epochs: 2
-  num_steps: 50
+  num_steps: 25
   optimizer: adamw
-  lr: 2.0e-4
+  lr: 3.0e-4
   patience: 2
   reduce_factor: 0.95
   q: 0.95
@@ -42,11 +42,10 @@ optimizer:
 
 model:
   dim: 128
-  depth: 12
+  depth: 6
   stereo: true
   num_stems: 4
-  num_latent_sources: 10
-  num_iterations: 3
+  num_latent_sources: 4
   backbone_type: ts_bsmamba2
   ts_sr: 44100
   ts_win: 2048
@@ -56,33 +55,7 @@ model:
   ts_num_repeat_map: 4
   stage1_loss_weight: 1.0
   stage2_loss_weight: 1.0
-  min_energy_epsilon: 1.0e-4
-  min_energy_loss_weight: 5.0e-4
-  duplicate_cos_threshold: 0.95
-  duplicate_loss_weight: 5.0e-4
-  repulsion_loss_weight: 1.0e-4
-  cgp_loss_weight: 1.0e-3
-  magnitude_penalty_loss_weight: 1.0e-3
-  magnitude_penalty_epsilon: 1.0e-4
-  cgp_warmup_steps: 300
-  repulsion_warmup_steps: 300
-  magnitude_penalty_warmup_steps: 300
-  use_homoscedastic_weighting: true
-  homoscedastic_init: 0.0
-  time_module_depth: 1
-  freq_module_depth: 1
-  mask_estimator_depth: 2
-  module_type: mamba2
-  dim_head: 64
-  heads: 8
-  ff_dropout: 0.1
-  attn_dropout: 0.1
-  flash_attn: true
-  mamba_gmlp: false
   stft_n_fft: 2048
-  stft_hop_length: 512
-  stft_win_length: 2048
-  stft_normalized: false
   multi_stft_resolution_loss_weight: 1.0
   multi_stft_resolutions_window_sizes: !!python/tuple
   - 4096
@@ -92,14 +65,6 @@ model:
   - 256
   multi_stft_hop_size: 147
   multi_stft_normalized: false
-  enable_repulsion: true
-  enable_pitch: true
-  enable_assignment: true
-  enable_gate: true
-  enable_intent: true
-  enable_cgp: true
-  enable_film: true
-  embed_dim: 64
 
 augmentations:
   enable: true

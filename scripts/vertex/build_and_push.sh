@@ -23,9 +23,11 @@ Environment:
   TAG               Image tag
   CACHE_TAG         Cache source tag (default: latest)
   CLOUD_CACHE_BACKEND
-                    cloud cache backend: docker or kaniko (default: docker)
+                    cloud cache backend: docker or kaniko (default: kaniko)
   KANIKO_CACHE_REPO Kaniko cache repository (default: <image>-cache)
   KANIKO_CACHE_TTL  Kaniko cache TTL (default: 336h)
+  KANIKO_CACHE_COPY_LAYERS
+                    cache COPY layers in Kaniko: true or false (default: false)
   DOCKER_PLATFORM   Docker target platform (default: linux/amd64)
   DOCKERFILE_PATH   Dockerfile path relative to repo root (default: scripts/Dockerfile)
   BUILD_MODE        Build backend: local or cloud (default: cloud)
@@ -41,7 +43,7 @@ CACHE_TAG="${CACHE_TAG:-latest}"
 DOCKER_PLATFORM="${DOCKER_PLATFORM:-linux/amd64}"
 BUILD_MODE="${BUILD_MODE:-cloud}"
 DOCKERFILE_PATH="${DOCKERFILE_PATH:-scripts/Dockerfile}"
-CLOUD_CACHE_BACKEND="${CLOUD_CACHE_BACKEND:-docker}"
+CLOUD_CACHE_BACKEND="${CLOUD_CACHE_BACKEND:-kaniko}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -101,6 +103,7 @@ CACHE_IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME
 KANIKO_CACHE_REPO_DEFAULT="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}-cache"
 KANIKO_CACHE_REPO="${KANIKO_CACHE_REPO:-${KANIKO_CACHE_REPO_DEFAULT}}"
 KANIKO_CACHE_TTL="${KANIKO_CACHE_TTL:-336h}"
+KANIKO_CACHE_COPY_LAYERS="${KANIKO_CACHE_COPY_LAYERS:-false}"
 echo "Using dockerfile: ${DOCKERFILE_REL}"
 echo "Image URI: ${IMAGE_URI}"
 echo "Cache image URI: ${CACHE_IMAGE_URI}"
@@ -140,7 +143,7 @@ steps:
       - --dockerfile=${DOCKERFILE_REL}
       - --destination=${IMAGE_URI}
       - --cache=true
-      - --cache-copy-layers=true
+      - --cache-copy-layers=${KANIKO_CACHE_COPY_LAYERS}
       - --cache-ttl=${KANIKO_CACHE_TTL}
       - --cache-repo=${KANIKO_CACHE_REPO}
 EOF
@@ -161,6 +164,7 @@ EOF
             echo "Cloud cache backend: kaniko"
             echo "Kaniko cache repo: ${KANIKO_CACHE_REPO}"
             echo "Kaniko cache ttl: ${KANIKO_CACHE_TTL}"
+            echo "Kaniko cache copy layers: ${KANIKO_CACHE_COPY_LAYERS}"
         elif [[ "${CLOUD_CACHE_BACKEND}" == "docker" ]]; then
             cat >"${build_config_file}" <<EOF
 steps:

@@ -4,8 +4,6 @@ FiLM (Feature-wise Linear Modulation) conditioning.
 Applies affine transformation gamma * x + beta, where gamma and beta
 are derived from a conditioning signal. Used to inject pitch/intent
 information into the separation pathway.
-
-Placeholder: passes input through unchanged.
 """
 
 import torch
@@ -24,9 +22,8 @@ class FiLMLayer(nn.Module):
         self.fc = nn.Linear(conditioning_dim, feature_dim * 2)
         nn.init.zeros_(self.fc.weight)
         nn.init.zeros_(self.fc.bias)
-        # Initialize gamma bias to 1 (identity), beta bias to 0
-        with torch.no_grad():
-            self.fc.bias[:feature_dim] = 1.0
+        self.gamma_scale = 0.25
+        self.beta_scale = 0.25
 
     def forward(
         self,
@@ -42,8 +39,11 @@ class FiLMLayer(nn.Module):
             Modulated features of same shape as x.
         """
         gamma_beta = self.fc(conditioning)  # (batch, feature_dim * 2)
-        gamma = gamma_beta[..., : self.feature_dim]
-        beta = gamma_beta[..., self.feature_dim :]
+        gamma_raw = gamma_beta[..., : self.feature_dim]
+        beta_raw = gamma_beta[..., self.feature_dim :]
+        # Keep FiLM close to identity at init and bound modulation amplitude.
+        gamma = 1.0 + self.gamma_scale * torch.tanh(gamma_raw)
+        beta = self.beta_scale * torch.tanh(beta_raw)
 
         # Broadcast gamma/beta over spatial dimensions
         while gamma.ndim < x.ndim:

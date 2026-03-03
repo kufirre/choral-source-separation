@@ -1,10 +1,10 @@
 audio:
-  chunk_size: 132300  # samplerate * segment
+  chunk_size: 132300
   hop_length: 1024
   min_mean_abs: 0.0
 
 training:
-  batch_size: 8
+  batch_size: 4
   gradient_accumulation_steps: 1
   grad_clip: 0.5
   segment: 11
@@ -14,13 +14,13 @@ training:
   normalize: true
   instruments: ['S', 'A', 'T', 'B']
   target_instrument: null
-  num_epochs: 40
-  num_steps: 300
+  num_epochs: 15
+  num_steps: 30
   optimizer: adamw
-  lr: 2.0e-4
-  patience: 2
-  reduce_factor: 0.5
-  early_stopping_patience: 8
+  lr: 2.0e-5
+  patience: 6
+  reduce_factor: 0.8
+  early_stopping_patience: 24
   q: 0.95
   coarse_loss_clip: true
   max_nonfinite_batches_per_epoch: 5
@@ -33,9 +33,7 @@ training:
 
 optimizer:
   weight_decay: 1.0e-2
-  betas: !!python/tuple
-  - 0.9
-  - 0.95
+  betas: !!python/tuple [0.9, 0.95]
   eps: 1.0e-8
 
 model:
@@ -43,8 +41,9 @@ model:
   depth: 12
   stereo: true
   num_stems: 4
-  num_latent_sources: 10
-  num_iterations: 1
+  num_latent_sources: 4
+  num_iterations: 0
+  assignment_mode: identity
   backbone_type: ts_bsmamba2
   ts_sr: 44100
   ts_win: 2048
@@ -52,21 +51,50 @@ model:
   ts_feature_dim: 128
   ts_num_repeat_mask: 8
   ts_num_repeat_map: 4
+
   stage1_loss_weight: 1.0
   stage2_loss_weight: 1.0
-  min_energy_epsilon: 1.0e-4
   min_energy_loss_weight: 0.0
-  duplicate_cos_threshold: 0.95
   duplicate_loss_weight: 0.0
   repulsion_loss_weight: 0.0
   cgp_loss_weight: 0.0
   magnitude_penalty_loss_weight: 0.0
-  magnitude_penalty_epsilon: 1.0e-4
-  cgp_warmup_steps: 0
-  repulsion_warmup_steps: 0
-  magnitude_penalty_warmup_steps: 0
+  assignment_entropy_weight: 0.0
+  assignment_capacity_loss_weight: 0.0
+  intent_similarity_loss_weight: 0.0
+  intent_adversary_loss_weight: 0.0
+  pitch_nll_loss_weight: 0.0
+  pitch_consistency_loss_weight: 0.0
+  voicing_consistency_loss_weight: 0.0
+  voicing_entropy_loss_weight: 0.0
+  gate_entropy_loss_weight: 0.0
+  gate_mean_loss_weight: 0.0
+  tail_inertia_weight: 0.0
+
   use_homoscedastic_weighting: false
   homoscedastic_init: 0.0
+
+  stft_n_fft: 2048
+  stft_hop_length: 512
+  stft_win_length: 2048
+  stft_normalized: false
+  multi_stft_resolution_loss_weight: 1.0
+  multi_stft_resolutions_window_sizes: !!python/tuple [4096, 2048, 1024, 512, 256]
+  multi_stft_hop_size: 147
+  multi_stft_normalized: false
+
+  enable_repulsion: false
+  enable_pitch: false
+  enable_assignment: false
+  enable_gate: false
+  enable_intent: false
+  enable_voicing_head: false
+  enable_soft_tokenizer: false
+  enable_cgp: false
+  enable_film: false
+
+  embed_dim: 64
+  pitch_num_components: 3
   time_module_depth: 1
   freq_module_depth: 1
   mask_estimator_depth: 2
@@ -77,39 +105,14 @@ model:
   attn_dropout: 0.1
   flash_attn: true
   mamba_gmlp: false
-  stft_n_fft: 2048
-  stft_hop_length: 512
-  stft_win_length: 2048
-  stft_normalized: false
-  multi_stft_resolution_loss_weight: 1.0
-  multi_stft_resolutions_window_sizes: !!python/tuple
-  - 4096
-  - 2048
-  - 1024
-  - 512
-  - 256
-  multi_stft_hop_size: 147
-  multi_stft_normalized: false
-  # Phase A stability profile: keep only assignment pathway active.
-  enable_repulsion: false
-  enable_pitch: false
-  enable_assignment: true
-  enable_gate: false
-  enable_intent: false
-  enable_cgp: false
-  enable_film: false
-  embed_dim: 64
 
 augmentations:
-  enable: true
+  enable: false
   loudness: true
   loudness_min: 0.5
   loudness_max: 1.5
   mixup: false
-  mixup_probs:
-    !!python/tuple
-    - 0.2
-    - 0.02
+  mixup_probs: !!python/tuple [0.2, 0.02]
   mixup_loudness_min: 0.5
   mixup_loudness_max: 1.5
   all:

@@ -139,8 +139,26 @@ class BSNet(nn.Module):
 
         return output.view(B, nch, N, T)
 
+class _BackboneFiLM(nn.Module):
+    """FiLM layer for 1D temporal features ``(B, D, T)`` conditioned by ``(B, C)``."""
+
+    def __init__(self, feature_dim: int, conditioning_dim: int):
+        super().__init__()
+        self.fc = nn.Linear(conditioning_dim, feature_dim * 2)
+        # Zero-init → identity at start (gamma=1, beta=0).
+        nn.init.zeros_(self.fc.weight)
+        nn.init.zeros_(self.fc.bias)
+
+    def forward(self, x: torch.Tensor, conditioning: torch.Tensor) -> torch.Tensor:
+        params = self.fc(conditioning)                       # (B, 2*D)
+        gamma_raw, beta_raw = params.chunk(2, dim=-1)        # each (B, D)
+        gamma = 1.0 + 0.25 * torch.tanh(gamma_raw)          # [0.75, 1.25]
+        beta = 0.25 * torch.tanh(beta_raw)                   # [-0.25, 0.25]
+        return gamma.unsqueeze(-1) * x + beta.unsqueeze(-1)  # broadcast over T
+
+
 class Separator(nn.Module):
-    def __init__(self, sr=44100, win=2048, stride=512, feature_dim=128, num_repeat_mask=8, num_repeat_map=4, num_output=4):
+    def __init__(self, sr=44100, win=2048, stride=512, feature_dim=128, num_repeat_mask=8, num_repeat_map=4, num_output=4, film_conditioning_dim=0):
         super(Separator, self).__init__()
         
         self.sr = sr
@@ -150,6 +168,7 @@ class Separator(nn.Module):
         self.enc_dim = self.win // 2 + 1
         self.feature_dim = feature_dim
         self.num_output = num_output
+        self.film_conditioning_dim = int(film_conditioning_dim)
         self.eps = torch.finfo(torch.float32).eps
 
         # 0-1k (50 hop), 1k-2k (100 hop), 2k-4k (250 hop), 4k-8k (500 hop), 8k-16k (1k hop), 16k-20k (2k hop), 20k-inf
@@ -215,6 +234,11 @@ class Separator(nn.Module):
                                           )
                             )
 
+        # FiLM conditioning layers (architecture.md §4.1)
+        if self.film_conditioning_dim > 0:
+            self.film_pre_mask = _BackboneFiLM(self.feature_dim, self.film_conditioning_dim)
+            self.film_pre_map = _BackboneFiLM(self.feature_dim, self.film_conditioning_dim)
+
     def pad_input(self, input, window, stride):
         """
         Zero-padding input according to window/stride size.
@@ -237,8 +261,9 @@ class Separator(nn.Module):
             return torch.autocast(device_type="cuda", enabled=False)
         return contextlib.nullcontext()
         
-    def forward(self, input, return_aux=False):
+    def forward(self, input, return_aux=False, film_conditioning=None):
         # input shape: (B, C, T)
+        # film_conditioning: optional (B, film_conditioning_dim)
 
         batch_size, nch, nsample = input.shape
         output_dtype = input.dtype
@@ -285,10 +310,18 @@ class Separator(nn.Module):
         sep_output2 = checkpoint_sequential(self.separator_map, 2, combined3.view(batch_size, nch, self.nband*self.feature_dim, -1))  # 1B, nband*N, T
         sep_output2 = sep_output2.view(batch_size * nch, self.nband, self.feature_dim, -1)
         
+        # Prepare per-channel FiLM conditioning for mask/map heads.
+        film_cond = None
+        if film_conditioning is not None and self.film_conditioning_dim > 0:
+            film_cond = film_conditioning.unsqueeze(1).expand(-1, nch, -1).reshape(batch_size * nch, -1)
+
         sep_subband_spec = []
         sep_subband_spec_mask = []
         for i in range(self.nband):
-            this_output = self.mask[i](sep_output[:,i]).view(batch_size*nch, 2, 2, self.num_output, self.band_width[i], -1)
+            feat = sep_output[:,i]
+            if film_cond is not None:
+                feat = self.film_pre_mask(feat, film_cond)
+            this_output = self.mask[i](feat).view(batch_size*nch, 2, 2, self.num_output, self.band_width[i], -1)
             this_mask = this_output[:,0] * torch.sigmoid(this_output[:,1])  # B*nch, 2, K, BW, T
             this_mask_real = this_mask[:,0]  # B*nch, K, BW, T
             this_mask_imag = this_mask[:,1]  # B*nch, K, BW, T
@@ -299,9 +332,12 @@ class Separator(nn.Module):
             this_mask_imag = this_mask_imag - this_mask_imag_sum / self.num_output
             est_spec_real = subband_spec[i].real.unsqueeze(1) * this_mask_real - subband_spec[i].imag.unsqueeze(1) * this_mask_imag  # B*nch, K, BW, T
             est_spec_imag = subband_spec[i].real.unsqueeze(1) * this_mask_imag + subband_spec[i].imag.unsqueeze(1) * this_mask_real  # B*nch, K, BW, T
-            
+
             ##################################
-            this_output2 = self.map[i](sep_output2[:,i]).view(batch_size*nch, 2, 2, self.num_output, self.band_width[i], -1)
+            feat2 = sep_output2[:,i]
+            if film_cond is not None:
+                feat2 = self.film_pre_map(feat2, film_cond)
+            this_output2 = self.map[i](feat2).view(batch_size*nch, 2, 2, self.num_output, self.band_width[i], -1)
             this_map = this_output2[:,0] * torch.sigmoid(this_output2[:,1])  # B*nch, 2, K, BW, T
             this_map_real = this_map[:,0]  # B*nch, K, BW, T
             this_map_imag = this_map[:,1]  # B*nch, K, BW, T
@@ -348,7 +384,89 @@ class Separator(nn.Module):
             # Residual map branch output in waveform domain.
             'residual_sources': output - output_mask,
         }
+        # Encoder cache for iterative re-masking via forward_heads_only().
+        if self.film_conditioning_dim > 0:
+            aux['encoder_cache'] = {
+                'sep_output': sep_output,
+                'sep_output2': sep_output2,
+                'subband_spec': subband_spec,
+                'batch_size': batch_size,
+                'nch': nch,
+                'nsample': nsample,
+                'output_dtype': output_dtype,
+            }
         return output, aux
+
+    def forward_heads_only(self, encoder_cache, film_conditioning=None):
+        """Re-run mask/map heads with FiLM conditioning, reusing cached encoder features.
+
+        Skips the expensive encoder (STFT, BN, separator_mask/map) and re-runs
+        only the lightweight Conv1d head networks + iSTFT.  Used by the VCIN
+        iterative loop to re-estimate sources after belief updates.
+        """
+        sep_output = encoder_cache['sep_output']
+        sep_output2 = encoder_cache['sep_output2']
+        subband_spec = encoder_cache['subband_spec']
+        batch_size = encoder_cache['batch_size']
+        nch = encoder_cache['nch']
+        nsample = encoder_cache['nsample']
+        output_dtype = encoder_cache['output_dtype']
+
+        film_cond = None
+        if film_conditioning is not None and self.film_conditioning_dim > 0:
+            film_cond = film_conditioning.unsqueeze(1).expand(-1, nch, -1).reshape(batch_size * nch, -1)
+
+        sep_subband_spec = []
+        sep_subband_spec_mask = []
+        for i in range(self.nband):
+            feat = sep_output[:, i]
+            if film_cond is not None:
+                feat = self.film_pre_mask(feat, film_cond)
+            this_output = self.mask[i](feat).view(batch_size * nch, 2, 2, self.num_output, self.band_width[i], -1)
+            this_mask = this_output[:, 0] * torch.sigmoid(this_output[:, 1])
+            this_mask_real = this_mask[:, 0]
+            this_mask_imag = this_mask[:, 1]
+            this_mask_real_sum = this_mask_real.sum(1).unsqueeze(1)
+            this_mask_imag_sum = this_mask_imag.sum(1).unsqueeze(1)
+            this_mask_real = this_mask_real - (this_mask_real_sum - 1) / self.num_output
+            this_mask_imag = this_mask_imag - this_mask_imag_sum / self.num_output
+            est_spec_real = subband_spec[i].real.unsqueeze(1) * this_mask_real - subband_spec[i].imag.unsqueeze(1) * this_mask_imag
+            est_spec_imag = subband_spec[i].real.unsqueeze(1) * this_mask_imag + subband_spec[i].imag.unsqueeze(1) * this_mask_real
+
+            feat2 = sep_output2[:, i]
+            if film_cond is not None:
+                feat2 = self.film_pre_map(feat2, film_cond)
+            this_output2 = self.map[i](feat2).view(batch_size * nch, 2, 2, self.num_output, self.band_width[i], -1)
+            this_map = this_output2[:, 0] * torch.sigmoid(this_output2[:, 1])
+            est_spec_real2 = est_spec_real + this_map[:, 0]
+            est_spec_imag2 = est_spec_imag + this_map[:, 1]
+
+            sep_subband_spec.append(torch.complex(est_spec_real2, est_spec_imag2))
+            sep_subband_spec_mask.append(torch.complex(est_spec_real, est_spec_imag))
+
+        sep_subband_spec = torch.cat(sep_subband_spec, 2)
+        est_spec_mask = torch.cat(sep_subband_spec_mask, 2)
+
+        with self._autocast_off_context(sep_subband_spec.device):
+            istft_window = torch.hann_window(self.win, device=sep_subband_spec.device, dtype=torch.float32)
+            output = torch.istft(
+                sep_subband_spec.view(batch_size * nch * self.num_output, self.enc_dim, -1).to(torch.complex64),
+                n_fft=self.win,
+                hop_length=self.stride,
+                window=istft_window,
+                length=nsample,
+            )
+            output_mask = torch.istft(
+                est_spec_mask.view(batch_size * nch * self.num_output, self.enc_dim, -1).to(torch.complex64),
+                n_fft=self.win,
+                hop_length=self.stride,
+                window=istft_window,
+                length=nsample,
+            )
+
+        output = output.view(batch_size, nch, self.num_output, -1).transpose(1, 2).contiguous().to(output_dtype)
+        output_mask = output_mask.view(batch_size, nch, self.num_output, -1).transpose(1, 2).contiguous().to(output_dtype)
+        return output, output_mask
 
 
 if __name__ == '__main__':

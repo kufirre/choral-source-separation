@@ -12,7 +12,7 @@ RUN_ID="${RUN_ID:-phase-a-vcin-satb-$(date +%Y%m%d-%H%M%S)}"
 JOB_NAME="${JOB_NAME:-${RUN_ID}}"
 
 MODEL_TYPE="${MODEL_TYPE:-vcin}"
-CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a_stable.yaml}"
+CONFIG_PATH="${CONFIG_PATH:-configs/vcin/config_vcin_satb_phase_a_staged.yaml}"
 DATASET_TYPE="${DATASET_TYPE:-4}"
 TRAIN_DATA_PATHS="${TRAIN_DATA_PATHS:-/gcs_data/processed/CSD_satb /gcs_data/processed/ChoralSynth_satb /gcs_data/processed/jaCappella_satb}"
 VALID_DATA_PATHS="${VALID_DATA_PATHS:-/gcs_data/processed/Cantoria_satb}"
@@ -26,8 +26,15 @@ DEVICE_IDS="${DEVICE_IDS:-0}"
 ALLOW_BLEED_DATASETS="${ALLOW_BLEED_DATASETS:-false}"
 USE_CHECKPOINT="${USE_CHECKPOINT:-false}"
 START_CHECKPOINT="${START_CHECKPOINT:-}"
-CHECKPOINT_LOAD_FLAGS="${CHECKPOINT_LOAD_FLAGS:---load_only_compatible_weights}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+RESUME_MODE="${RESUME_MODE:-bootstrap}" # bootstrap|resume
+BOOTSTRAP_LOAD_FLAGS="${BOOTSTRAP_LOAD_FLAGS---partial_backbone_load}"
+RESUME_LOAD_FLAGS="${RESUME_LOAD_FLAGS:---load_optimizer --load_scheduler --load_epoch --load_best_metric --load_all_metrics --load_all_losses}"
+
+if [[ "${RESUME_MODE}" != "bootstrap" && "${RESUME_MODE}" != "resume" ]]; then
+    echo "Invalid RESUME_MODE='${RESUME_MODE}'. Expected 'bootstrap' or 'resume'." >&2
+    exit 1
+fi
 
 if [[ "${START_CHECKPOINT}" == gs://* ]]; then
     export BOOTSTRAP_CKPT_URI="${BOOTSTRAP_CKPT_URI:-${START_CHECKPOINT}}"
@@ -76,7 +83,12 @@ fi
 
 TRAIN_CMD_DEFAULT="python train.py --model_type ${MODEL_TYPE} --config_path ${CONFIG_PATH} --results_path ${RESULTS_PATH} --dataset_type ${DATASET_TYPE} --data_path ${TRAIN_DATA_PATHS} --valid_path ${VALID_DATA_PATHS} ${DATALOADER_ARGS} --device_ids ${DEVICE_IDS} ${EXTRA_TRAIN_ARGS}"
 if [[ -n "${START_CHECKPOINT}" ]]; then
-    TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} --start_check_point ${START_CHECKPOINT} ${CHECKPOINT_LOAD_FLAGS}"
+    TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} --start_check_point ${START_CHECKPOINT}"
+    if [[ "${RESUME_MODE}" == "resume" ]]; then
+        TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} ${RESUME_LOAD_FLAGS}"
+    elif [[ -n "${BOOTSTRAP_LOAD_FLAGS}" ]]; then
+        TRAIN_CMD_DEFAULT="${TRAIN_CMD_DEFAULT} ${BOOTSTRAP_LOAD_FLAGS}"
+    fi
 fi
 TRAIN_CMD="${TRAIN_CMD:-${TRAIN_CMD_DEFAULT}}"
 

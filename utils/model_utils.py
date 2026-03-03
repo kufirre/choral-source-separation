@@ -565,8 +565,9 @@ def load_start_checkpoint(args: argparse.Namespace,
     """
     Load an initial checkpoint into `model`.
 
-    For `type_ == "train"`, performs a tolerant load using `old_model` (a state dict or a
-    checkpoint dict) via `load_not_compatible_weights`, allowing partial shape mismatches.
+    For `type_ == "train"`, VCIN uses strict loading (full state compatibility required).
+    Non-VCIN models keep tolerant loading via `load_not_compatible_weights`, allowing
+    partial shape mismatches for legacy workflows.
     For other modes, loads a strict state dict from `args.start_check_point`, with special
     handling for HTDemucs/Apollo checkpoints (keys under "state"/"state_dict"). If
     `args.lora_checkpoint` is set, LoRA weights are applied after the base load.
@@ -574,8 +575,9 @@ def load_start_checkpoint(args: argparse.Namespace,
     Args:
         args: Namespace with at least `start_check_point`, `model_type`, and optionally `lora_checkpoint`.
         model: Target PyTorch module to receive weights.
-        old_model: Source weights for tolerant loading in train mode (state dict or checkpoint dict).
-        type_: Loading strategy; "train" uses tolerant loading, otherwise strict loading from path.
+        old_model: Source weights for loading in train mode (state dict or checkpoint dict).
+        type_: Loading strategy; "train" uses strict loading for VCIN and tolerant loading
+            for other model types. Non-train modes use strict loading from path.
 
     Returns:
         None
@@ -584,11 +586,71 @@ def load_start_checkpoint(args: argparse.Namespace,
 
     if should_print:
         print(f'Start from checkpoint: {args.start_check_point}')
+
+    def _extract_state_dict(state_obj):
+        if isinstance(state_obj, dict):
+            if 'state' in state_obj and isinstance(state_obj['state'], dict):
+                return state_obj['state']
+            if 'state_dict' in state_obj and isinstance(state_obj['state_dict'], dict):
+                return state_obj['state_dict']
+            if 'model_state_dict' in state_obj and isinstance(state_obj['model_state_dict'], dict):
+                return state_obj['model_state_dict']
+        return state_obj
+
+    def _align_module_prefix(state_dict):
+        if not isinstance(state_dict, dict):
+            return state_dict
+        if len(state_dict) == 0:
+            return state_dict
+
+        model_keys = list(model.state_dict().keys())
+        if len(model_keys) == 0:
+            return state_dict
+
+        state_has_module = any(k.startswith('module.') for k in state_dict.keys())
+        model_has_module = any(k.startswith('module.') for k in model_keys)
+
+        if state_has_module and not model_has_module:
+            return {
+                (k[len('module.'):] if k.startswith('module.') else k): v
+                for k, v in state_dict.items()
+            }
+        if model_has_module and not state_has_module:
+            return {f'module.{k}': v for k, v in state_dict.items()}
+        return state_dict
+
     if type_ in ['train']:
-        if not args.load_only_compatible_weights:
-            load_not_compatible_weights(model, old_model, verbose=False)
+        state_to_load = _extract_state_dict(old_model)
+        if state_to_load is old_model:
+            state_to_load = _extract_state_dict(
+                torch.load(args.start_check_point, map_location='cpu', weights_only=False)
+            )
+        state_to_load = _align_module_prefix(state_to_load)
+        if getattr(args, 'model_type', '') in ('vcin', 'vcin_direct4'):
+            partial_backbone = getattr(args, 'partial_backbone_load', False)
+            if partial_backbone:
+                # Bootstrap from a TS-BSMamba2 checkpoint (e.g. 4-output)
+                # into a VCIN model (10-output). Loads shared encoder
+                # weights; mask/map heads train from scratch.
+                if should_print:
+                    print('[vcin] Partial backbone load from checkpoint (shared encoder only)')
+                model.load_backbone_weights(
+                    old_model,
+                    checkpoint_path=args.start_check_point,
+                    verbose=should_print,
+                )
+            else:
+                try:
+                    model.load_state_dict(state_to_load, strict=True)
+                except RuntimeError as exc:
+                    if should_print:
+                        print(
+                            f'[vcin] Strict load failed ({exc}). '
+                            'Hint: use --partial_backbone_load for 4→10 bootstrap.'
+                        )
+                    raise
         else:
-            model.load_state_dict(torch.load(args.start_check_point))
+            load_not_compatible_weights(model, state_to_load, verbose=False)
     else:
         device = 'cpu'
         if args.model_type in ['htdemucs', 'apollo']:

@@ -169,8 +169,11 @@ def _report_nonfinite_gradients(module: torch.nn.Module, topk: int = 8) -> bool:
     return True
 
 
-def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids, return_loss_breakdown=False):
-    def _call_model(x_in, y_in, active_ids_in):
+def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids, return_loss_breakdown=False, f0_target=None):
+    def _call_model(x_in, y_in, active_ids_in, f0_in=None):
+        extra_kwargs = {}
+        if f0_in is not None:
+            extra_kwargs['f0_target'] = f0_in
         if return_loss_breakdown:
             try:
                 model_out = model(
@@ -178,9 +181,10 @@ def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, de
                     y_in,
                     active_stem_ids=active_ids_in,
                     return_loss_breakdown=True,
+                    **extra_kwargs,
                 )
             except TypeError as exc:
-                if 'return_loss_breakdown' not in str(exc):
+                if 'return_loss_breakdown' not in str(exc) and 'f0_target' not in str(exc):
                     raise
                 model_out = model(x_in, y_in, active_stem_ids=active_ids_in)
                 return model_out, {}
@@ -189,7 +193,7 @@ def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, de
                 return model_out[0], model_out[1]
             return model_out, {}
 
-        return model(x_in, y_in, active_stem_ids=active_ids_in), {}
+        return model(x_in, y_in, active_stem_ids=active_ids_in, **extra_kwargs), {}
 
     if get_internal_loss:
         active_stem_ids = _normalize_active_stem_ids(active_stem_ids, x.shape[0])
@@ -204,10 +208,12 @@ def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, de
             losses = []
             breakdown_terms = {}
             for sample_idx, sample_active_ids in enumerate(active_stem_ids):
+                sample_f0 = f0_target[sample_idx: sample_idx + 1] if f0_target is not None else None
                 sample_loss, sample_breakdown = _call_model(
                     x[sample_idx: sample_idx + 1],
                     y[sample_idx: sample_idx + 1],
                     sample_active_ids,
+                    f0_in=sample_f0,
                 )
                 losses.append(sample_loss)
                 if return_loss_breakdown:
@@ -223,7 +229,7 @@ def forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, de
                 return loss, aggregated
             return loss
 
-        loss, breakdown = _call_model(x, y, active_stem_ids)
+        loss, breakdown = _call_model(x, y, active_stem_ids, f0_in=f0_target)
         if isinstance(device_ids, (list, tuple)):
             loss = loss.mean()
             if return_loss_breakdown and breakdown:
@@ -297,6 +303,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
         'mel_band_roformer',
         'bs_roformer',
         'vcin',
+        'vcin_direct4',
         'mel_band_conformer',
         'bs_conformer'
     ) and not args.use_standard_loss)
@@ -311,22 +318,39 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
         pbar = tqdm(train_loader)
 
     for i, data in enumerate(pbar):
-        if len(data)==3:
-            batch, mixes, active_stem_ids = data
-        elif len(data)==2:
+        f0_target = None
+        if len(data) == 4:
+            batch, mixes, third, fourth = data
+            if torch.is_tensor(third):
+                # (stems, mix, f0_target, active_stem_ids?) uncommon, keep robust
+                active_stem_ids = fourth
+                f0_target = third
+            else:
+                active_stem_ids = third
+                f0_target = fourth if torch.is_tensor(fourth) else None
+        elif len(data) == 3:
+            batch, mixes, third = data
+            if torch.is_tensor(third):
+                active_stem_ids = None
+                f0_target = third
+            else:
+                active_stem_ids = third
+        elif len(data) == 2:
             batch, mixes = data
             active_stem_ids = None
         else:
             raise ValueError(f'len data is {len(data)}')
         x = mixes.to(device)
         y = batch.to(device)
+        if f0_target is not None:
+            f0_target = f0_target.to(device)
 
         if normalize:
             x, y = normalize_batch(x, y)
 
         loss_breakdown = {}
         request_loss_breakdown = (
-            args.model_type == 'vcin'
+            args.model_type in ('vcin', 'vcin_direct4')
             and vcin_loss_breakdown_every > 0
             and (i % vcin_loss_breakdown_every == 0)
         )
@@ -336,10 +360,10 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                     if request_loss_breakdown:
                         loss, loss_breakdown = forward_step(
                             x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids,
-                            return_loss_breakdown=True,
+                            return_loss_breakdown=True, f0_target=f0_target,
                         )
                     else:
-                        loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
+                        loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids, f0_target=f0_target)
             except Exception as e:
                 print(f'Error: {e}')
                 continue
@@ -348,10 +372,10 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                 if request_loss_breakdown:
                     loss, loss_breakdown = forward_step(
                         x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids,
-                        return_loss_breakdown=True,
+                        return_loss_breakdown=True, f0_target=f0_target,
                     )
                 else:
-                    loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids)
+                    loss = forward_step(x, y, active_stem_ids, get_internal_loss, model, multi_loss, device_ids, f0_target=f0_target)
 
         # Fail fast on NaN / Inf instead of silently poisoning the whole epoch.
         if not torch.isfinite(loss):
@@ -364,7 +388,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                 sys.stdout.flush()
                 # Always log breakdown on non-finite loss for VCIN models.
                 # Use eval mode to avoid mutating _train_step during debug re-forward.
-                if not request_loss_breakdown and get_internal_loss and args.model_type == 'vcin':
+                if not request_loss_breakdown and get_internal_loss and args.model_type in ('vcin', 'vcin_direct4'):
                     was_training = model.training
                     try:
                         model.eval()
@@ -372,6 +396,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                             _, loss_breakdown = forward_step(
                                 x, y, active_stem_ids, get_internal_loss, model,
                                 multi_loss, device_ids, return_loss_breakdown=True,
+                                f0_target=f0_target,
                             )
                     except Exception as exc:
                         print(f"[vcin-loss] debug re-forward failed: {exc}")
@@ -483,7 +508,7 @@ def train_one_epoch(model: torch.nn.Module, config: ConfigDict, args: argparse.N
                 else:
                     ema_model.update_parameters(ema_source)
 
-            if scheduler.name in ['linear_scheduler']:
+            if scheduler.name in ['linear_scheduler', 'constant_with_warmup']:
                 scheduler.step()
             optimizer.zero_grad(set_to_none=True)
         if ddp:
@@ -559,24 +584,7 @@ def compute_epoch_metrics(model: torch.nn.Module, args: argparse.Namespace, conf
 
     metric_avg = metrics_avg[args.metric_for_scheduler]
     if metric_avg > best_metric:
-
-        if args.each_metrics_in_name:
-            stem_parts = []
-            for stem_name, values in all_metrics[args.metric_for_scheduler].items():
-                stem_values = np.array(values)
-                mean_val = stem_values.mean()
-                std_val = stem_values.std()
-                stem_parts.append(
-                    f"{stem_name}_{args.metric_for_scheduler}_{mean_val:.4f}_std_{std_val:.4f}"
-                )
-            stem_info = "__".join(stem_parts)
-            store_path = (
-                f"{args.results_path}/model_{args.model_type}_ep_{epoch}_{stem_info}.ckpt"
-            )
-        else:
-            store_path = (
-                f"{args.results_path}/model_{args.model_type}_ep_{epoch}_{args.metric_for_scheduler}_{metric_avg:.4f}.ckpt"
-            )
+        store_path = f"{args.results_path}/model_{args.model_type}_ep_{epoch}.ckpt"
         if should_print:
             print(f'Store weights: {store_path}')
             save_weights(
@@ -587,29 +595,11 @@ def compute_epoch_metrics(model: torch.nn.Module, args: argparse.Namespace, conf
                 epoch=epoch,
                 all_time_all_metrics=all_time_all_metrics,
                 all_losses=all_losses,
-                best_metric=best_metric,
+                best_metric=metric_avg,
                 args=args,
                 scheduler=scheduler
             )
         best_metric = metric_avg
-
-    if args.save_weights_every_epoch:
-        metric_string = ''
-        for m in metrics_avg:
-            metric_string += '_{}_{:.4f}'.format(m, metrics_avg[m])
-        store_path = f'{args.results_path}/model_{args.model_type}_ep_{epoch}{metric_string}.ckpt'
-        save_weights(
-            store_path=store_path,
-            model=model,
-            device_ids=device_ids,
-            optimizer=optimizer,
-            epoch=epoch,
-            all_time_all_metrics=all_time_all_metrics,
-            all_losses=all_losses,
-            best_metric=best_metric,
-            args=args,
-            scheduler=scheduler
-        )
 
     if scheduler.name in ['ReduceLROnPlateau']:
         scheduler.step(metric_avg)
@@ -668,18 +658,7 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
     checkpoint = {}
     if args.start_check_point:
         checkpoint = torch.load(args.start_check_point, weights_only=False, map_location='cpu')
-        if (
-            args.model_type == 'vcin'
-            and args.load_only_compatible_weights
-            and hasattr(model, 'load_backbone_weights')
-        ):
-            model.load_backbone_weights(
-                checkpoint,
-                checkpoint_path=args.start_check_point,
-                verbose=True,
-            )
-        else:
-            load_start_checkpoint(args, model, checkpoint, type_='train')
+        load_start_checkpoint(args, model, checkpoint, type_='train')
     model = get_lora(args, config, model)
 
     if args.freeze_layers is not None:
@@ -740,7 +719,11 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     if args.start_check_point and "scheduler_state_dict" in checkpoint and args.load_scheduler:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        scheduler_state = checkpoint["scheduler_state_dict"]
+        if scheduler_state is not None:
+            scheduler.load_state_dict(scheduler_state)
+        elif should_print:
+            print("Checkpoint scheduler_state_dict is None; skipping scheduler restore.")
 
     # load num epoch
     if args.start_check_point and "epoch" in checkpoint and args.load_epoch:
@@ -749,7 +732,16 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
         start_epoch = 0
 
     if args.start_check_point and "best_metric" in checkpoint and args.load_best_metric:
-        best_metric = checkpoint["best_metric"]
+        loaded_best_metric = checkpoint["best_metric"]
+        if isinstance(loaded_best_metric, (int, float)):
+            best_metric = float(loaded_best_metric)
+        else:
+            if should_print:
+                print(
+                    f"Checkpoint best_metric has unexpected type "
+                    f"{type(loaded_best_metric).__name__}; resetting to -inf."
+                )
+            best_metric = float('-inf')
     else:
         best_metric = float('-inf')
 
@@ -820,7 +812,17 @@ def train_model(args: Union[argparse.Namespace, None], rank=None, world_size=Non
         model_to_valid = ema_model if ema_model is not None else model
 
         if should_print:
-            save_last_weights(args, model, device_ids, optimizer, epoch, all_time_all_metrics, best_metric, scheduler)
+            save_last_weights(
+                args=args,
+                model=model,
+                device_ids=device_ids,
+                optimizer=optimizer,
+                epoch=epoch,
+                all_time_all_metrics=all_time_all_metrics,
+                all_losses=all_losses,
+                best_metric=best_metric,
+                scheduler=scheduler,
+            )
         if ddp:
             metrics_avg, all_metrics = valid_multi_gpu(model_to_valid, args, config, args.device_ids, verbose=False)
             if rank == 0:
